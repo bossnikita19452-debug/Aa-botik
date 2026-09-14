@@ -34,10 +34,8 @@ scheduler = AsyncIOScheduler()
 
 MY_CHAT_ID = 396041420  # ← ваш ID
 
-# Хранилище отправленных сигналов
 sent_signals: dict = {}
 
-# Флаги включения типов сделок
 settings = {
     "scalp": SCALP_ENABLED,
     "swing": SWING_ENABLED,
@@ -45,7 +43,6 @@ settings = {
 }
 
 
-# ─── Форматирование сообщений ─────────────────────────────────────
 def confidence_emoji(conf: str) -> str:
     return {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(conf, "⚪")
 
@@ -68,7 +65,6 @@ def format_signal(s: dict) -> str:
     )
 
 
-# ─── Клавиатуры ───────────────────────────────────────────────────
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🪙 Биткоин дня", callback_data="btc_day")],
@@ -91,7 +87,6 @@ def settings_menu() -> InlineKeyboardMarkup:
     ])
 
 
-# ─── Обработчики команд ───────────────────────────────────────────
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
@@ -192,7 +187,6 @@ async def cb_rescan(call: CallbackQuery):
     asyncio.create_task(run_scan())
 
 
-# ─── Основной цикл сканирования ───────────────────────────────────
 async def run_scan():
     logger.info(f"Начинаю сканирование: {datetime.now()}")
     try:
