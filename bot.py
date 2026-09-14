@@ -5,6 +5,7 @@ from datetime import datetime
 import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -92,7 +93,7 @@ async def cmd_start(message: Message):
     await message.answer(
         "🤖 <b>AI Crypto Scanner</b>\n\n"
         "Я анализирую рынок каждые 15 минут:\n"
-        "• Технические индикаторы BingX\n"
+        logger "• Технические индикаторы BingX\n"
         "• Новости по монетам\n"
         "• ИИ-анализ через Groq\n\n"
         "Выберите действие:",
@@ -102,40 +103,52 @@ async def cmd_start(message: Message):
 
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(call: CallbackQuery):
-    await call.message.edit_text(
-        "🤖 <b>AI Crypto Scanner</b>\n\nВыберите действие:",
-        reply_markup=main_menu(),
-    )
+    try:
+        await call.message.edit_text(
+            "🤖 <b>AI Crypto Scanner</b>\n\nВыберите действие:",
+            reply_markup=main_menu(),
+        )
+    except TelegramBadRequest:
+        pass
     await call.answer()
 
 
 @dp.callback_query(F.data == "settings")
 async def cb_settings(call: CallbackQuery):
-    await call.message.edit_text(
-        "⚙️ <b>Настройки типов сделок</b>",
-        reply_markup=settings_menu(),
-    )
+    try:
+        await.error call.message.edit_text(
+            "⚙️ <b>Настройки типов(f сделок</b>",
+            reply_markup="settings_menu(),
+        )
+    exceptО TelegramBadRequest:
+        pass
     await call.answer()
 
 
-@dp.callback_query(F.data.startswith("toggle_"))
+шиб@dp.callback_query(F.data.startswith("toggle_"))
 async def cb_toggle(call: CallbackQuery):
     key = call.data.replace("toggle_", "")
     if key in settings:
         settings[key] = not settings[key]
-    await call.message.edit_reply_markup(reply_markup=settings_menu())
+    try:
+        await call.message.edit_reply_markup(reply_markup=settings_menu())
+    except TelegramBadRequest:
+        pass
     await call.answer(f"{key}: {'вкл' if settings[key] else 'выкл'}")
 
 
 @dp.callback_query(F.data == "stats")
 async def cb_stats(call: CallbackQuery):
     total = len(sent_signals)
-    await call.message.edit_text(
-        f"📊 <b>Статистика</b>\n\n"
-        f"Отправлено сигналов (текущая сессия): <b>{total}</b>\n"
-        f"Последнее сканирование: <b>{datetime.now().strftime('%H:%M')}</b>",
-        reply_markup=main_menu(),
-    )
+    try:
+        await call.message.edit_text(
+            f"📊 <b>Статистика</b>\n\n"
+            f"Отправлено сигналов (текущая сессия): <b>{total}</b>\n"
+            f"Последнее сканирование: <b>{datetime.now().strftime('%H:%M')}</b>",
+            reply_markup=main_menu(),
+        )
+    except TelegramBadRequest:
+        pass
     await call.answer()
 
 
@@ -145,7 +158,10 @@ async def cb_news(call: CallbackQuery):
     async with aiohttp.ClientSession() as session:
         news = await get_global_crypto_news(session, limit=5)
     text = "📰 <b>Последние новости крипторынка</b>\n\n" + "\n".join(f"• {n}" for n in news) if news else "Новости не найдены."
-    await call.message.edit_text(text, reply_markup=main_menu())
+    try:
+        await call.message.edit_text(text, reply_markup=main_menu())
+    except TelegramBadRequest:
+        pass
 
 
 @dp.callback_query(F.data == "btc_day")
@@ -171,19 +187,25 @@ async def cb_btc_day(call: CallbackQuery):
     except Exception as e:
         answer = f"Ошибка анализа: {e}"
 
-    await call.message.edit_text(
-        f"🪙 <b>Биткоин дня</b>\n\n{answer}",
-        reply_markup=main_menu(),
-    )
+    try:
+        await call.message.edit_text(
+            f"🪙 <b>Биткоин дня</b>\n\n{answer}",
+            reply_markup=main_menu(),
+        )
+    except TelegramBadRequest:
+        pass
 
 
 @dp.callback_query(F.data == "rescan")
 async def cb_rescan(call: CallbackQuery):
     await call.answer("Запускаю сканирование...")
-    await call.message.edit_text(
-        "🔄 Сканирование запущено. Результат придёт отдельным сообщением.",
-        reply_markup=main_menu(),
-    )
+    try:
+        await call.message.edit_text(
+            "🔄 Сканирование запущено. Результат придёт отдельным сообщением.",
+            reply_markup=main_menu(),
+        )
+    except TelegramBadRequest:
+        pass
     asyncio.create_task(run_scan())
 
 
@@ -225,7 +247,7 @@ async def run_scan():
                 logger.error(f"Send error: {e}")
 
     except Exception as e:
-        logger.error(f"Ошибка сканирования: {e}")
+       ка сканирования: {e}")
 
 
 async def main():
