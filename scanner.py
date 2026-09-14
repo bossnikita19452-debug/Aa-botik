@@ -1,9 +1,7 @@
 import asyncio
-import time
-
 import aiohttp
 import pandas as pd
-from bingx_py import BingXHttpClient
+from bingx_py import BingXHttpClient, exceptions
 
 from config import (
     BINGX_API_KEY, BINGX_SECRET_KEY,
@@ -19,25 +17,17 @@ from risk_calculator import calculate_tp_sl, is_rr_valid
 MAX_SYMBOLS = 50
 
 
-# ─── Глобальный клиент BingX ──────────────────────────────────────
-client = BingXHttpClient(
-    api_key=BINGX_API_KEY,
-    api_secret=BINGX_SECRET_KEY,
-    base_url="https://api.bingx.com",
-)
-
-
 async def get_all_futures_symbols() -> list[str]:
     """Получить список фьючерсных пар BingX через библиотеку."""
     try:
-        await client.connect_async()
-        contracts = await client.swap_v2_public_get_quote_contracts()
-        symbols = []
-        for item in contracts.get("data", []):
-            symbol = item.get("symbol", "")
-            if symbol.endswith("-USDT") and item.get("status") == 1:
-                symbols.append(symbol)
-        return symbols
+        async with BingXHttpClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY, base_url="https://api.bingx.com") as client:
+            response = await client.swap_v2_public_get_quote_contracts()
+            symbols = []
+            for item in response.get("data", []):
+                symbol = item.get("symbol", "")
+                if symbol.endswith("-USDT") and item.get("status") == 1:
+                    symbols.append(symbol)
+            return symbols
     except Exception as e:
         print(f"Ошибка получения списка пар: {e}")
         return []
@@ -46,10 +36,10 @@ async def get_all_futures_symbols() -> list[str]:
 async def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
     """Получить свечи через библиотеку BingX (подпись обрабатывается автоматически)."""
     try:
-        await client.connect_async()
-        response = await client.swap_v2_public_get_quote_klines(
-            params={"symbol": symbol, "interval": interval, "limit": limit}
-        )
+        async with BingXHttpClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY, base_url="https://api.bingx.com") as client:
+            response = await client.swap_v3_public_get_quote_klines(
+                params={"symbol": symbol, "interval": interval, "limit": limit}
+            )
 
         if not isinstance(response, dict) or response.get("code") != 0:
             return pd.DataFrame()
@@ -62,7 +52,6 @@ async def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFra
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         return df.dropna()
-
     except Exception as e:
         print(f"Ошибка свечей {symbol} {interval}: {e}")
         return pd.DataFrame()
