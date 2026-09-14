@@ -1,6 +1,10 @@
 import json
-from openai import OpenAI
-from config import GROQ_API_KEY, GROQ_MODEL
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_API_KEY,
+), GROQ_MODEL
 
 
 # Клиент Groq (совместим с OpenAI-форматом)
