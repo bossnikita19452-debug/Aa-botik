@@ -1,13 +1,12 @@
 import asyncio
-import hashlib
-import hmac
 import time
 
 import aiohttp
 import pandas as pd
+from bingx_py import BingXHttpClient
 
 from config import (
-    BINGX_API_KEY, BINGX_SECRET_KEY, BINGX_BASE_URL,
+    BINGX_API_KEY, BINGX_SECRET_KEY,
     MIN_VOLUME_USDT, MIN_RR, MAX_RR,
     SCALP_ENABLED, SWING_ENABLED, LONGTERM_ENABLED,
 )
@@ -20,58 +19,53 @@ from risk_calculator import calculate_tp_sl, is_rr_valid
 MAX_SYMBOLS = 50
 
 
-def _sign(params: str) -> str:
-    return hmac.new(
-        BINGX_SECRET_KEY.encode("utf-8"),
-        params.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
+# ─── Глобальный клиент BingX ──────────────────────────────────────
+client = BingXHttpClient(
+    api_key=BINGX_API_KEY,
+    api_secret=BINGX_SECRET_KEY,
+    base_url="https://api.bingx.com",
+)
 
 
-async def fetch_signed(session: aiohttp.ClientSession, endpoint: str, params: dict) -> dict:
-    params["timestamp"] = int(time.time() * 1000)
-    sorted_params = "&".join(f"{k}={v}" for k, v in sorted(params.items()) if v is not None)
-    signature = _sign(sorted_params)
-    url = f"{BINGX_BASE_URL}{endpoint}?{sorted_params}&signature={signature}"
-    headers = {"X-BX-APIKEY": BINGX_API_KEY}
-    async with session.get(url, headers=headers) as resp:
-        return await resp.json()
+async def get_all_futures_symbols() -> list[str]:
+    """Получить список фьючерсных пар BingX через библиотеку."""
+    try:
+        await client.connect_async()
+        contracts = await client.swap_v2_public_get_quote_contracts()
+        symbols = []
+        for item in contracts.get("data", []):
+            symbol = item.get("symbol", "")
+            if symbol.endswith("-USDT") and item.get("status") == 1:
+                symbols.append(symbol)
+        return symbols
+    except Exception as e:
+        print(f"Ошибка получения списка пар: {e}")
+        return []
 
 
-async def get_all_futures_symbols(session: aiohttp.ClientSession) -> list[str]:
-    data = await fetch_signed(session, "/openApi/swap/v2/quote/contracts", {})
-    return [
-        item.get("symbol", "")
-        for item in data.get("data", [])
-        if item.get("symbol", "").endswith("-USDT") and item.get("status") == 1
-    ]
+async def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
+    """Получить свечи через библиотеку BingX (подпись обрабатывается автоматически)."""
+    try:
+        await client.connect_async()
+        response = await client.swap_v2_public_get_quote_klines(
+            params={"symbol": symbol, "interval": interval, "limit": limit}
+        )
 
+        if not isinstance(response, dict) or response.get("code") != 0:
+            return pd.DataFrame()
 
-async def get_klines(session: aiohttp.ClientSession, symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
-    data = await fetch_signed(
-        session,
-        "/openApi/swap/v3/quote/klines",
-        {"symbol": symbol, "interval": interval, "limit": limit},
-    )
+        rows = response.get("data", [])
+        if not rows:
+            return pd.DataFrame()
 
-    # Отладка: показываем, что вернул BingX
-    if not isinstance(data, dict):
-        print(f"DEBUG {symbol} {interval}: ответ не dict: {type(data)}")
+        df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume", "close_time"])
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df.dropna()
+
+    except Exception as e:
+        print(f"Ошибка свечей {symbol} {interval}: {e}")
         return pd.DataFrame()
-
-    if data.get("code") not in (0, "0", None):
-        print(f"DEBUG {symbol} {interval}: code={data.get('code')} msg={data.get('msg')}")
-        return pd.DataFrame()
-
-    rows = data.get("data", [])
-    if not rows:
-        print(f"DEBUG {symbol} {interval}: пустой data, ответ={str(data)[:200]}")
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume", "close_time"])
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna()
 
 
 def check_scalp(df_5m, df_15m):
@@ -165,20 +159,20 @@ def check_longterm(df_1d):
 
 async def scan_all() -> list[dict]:
     signals = []
+    all_symbols = await get_all_futures_symbols()
+    symbols = all_symbols[:MAX_SYMBOLS]
+    print(f"=== Сканирую {len(symbols)} монет из {len(all_symbols)} ===")
+
+    stats = {"no_klines": 0, "low_volume": 0, "no_signal": 0, "candidate": 0}
+
     async with aiohttp.ClientSession() as session:
-        all_symbols = await get_all_futures_symbols(session)
-        symbols = all_symbols[:MAX_SYMBOLS]
-        print(f"=== Сканирую {len(symbols)} монет из {len(all_symbols)} ===")
-
-        stats = {"no_klines": 0, "low_volume": 0, "no_signal": 0, "candidate": 0}
-
         for i, symbol in enumerate(symbols):
             try:
-                df_5m = await get_klines(session, symbol, "5m", 100)
-                df_15m = await get_klines(session, symbol, "15m", 100)
-                df_1h = await get_klines(session, symbol, "1h", 250)
-                df_4h = await get_klines(session, symbol, "4h", 100)
-                df_1d = await get_klines(session, symbol, "1d", 250)
+                df_5m = await get_klines(symbol, "5m", 100)
+                df_15m = await get_klines(symbol, "15m", 100)
+                df_1h = await get_klines(symbol, "1h", 250)
+                df_4h = await get_klines(symbol, "4h", 100)
+                df_1d = await get_klines(symbol, "1d", 250)
 
                 if df_5m.empty or df_1h.empty or df_1d.empty:
                     print(f"[{i+1}/{len(symbols)}] {symbol}: нет свечей")
@@ -225,11 +219,9 @@ async def scan_all() -> list[dict]:
 
                     levels = calculate_tp_sl(df_for_atr)
                     if not levels:
-                        print(f"    {symbol} [{cand['type']}]: ATR не рассчитался")
                         continue
 
                     if not is_rr_valid(levels["rr"], MIN_RR, MAX_RR):
-                        print(f"    {symbol} [{cand['type']}]: RR {levels['rr']} вне [{MIN_RR}, {MAX_RR}]")
                         continue
 
                     ai_result = await analyze_setup(
@@ -241,8 +233,6 @@ async def scan_all() -> list[dict]:
                         news_headlines=news,
                         deal_type=cand["type_label"],
                     )
-
-                    print(f"    {symbol} [{cand['type']}]: ИИ → {ai_result.get('signal')} ({ai_result.get('confidence')})")
 
                     if ai_result.get("signal") != "long":
                         continue
@@ -266,7 +256,7 @@ async def scan_all() -> list[dict]:
                     await asyncio.sleep(1)
 
             except Exception as e:
-                print(f"Error scanning {symbol}: {e}")
+                print(f"Ошибка {symbol}: {e}")
                 continue
 
         print(f"=== ИТОГО: {stats} ===")
