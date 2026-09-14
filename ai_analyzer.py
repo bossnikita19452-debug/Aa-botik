@@ -17,10 +17,7 @@ SYSTEM_PROMPT = """Ты — профессиональный крипто-ана
   "signal": "long" | "no_signal",
   "confidence": "high" | "medium" | "low",
   "reason": "краткое объяснение на русском (1-2 предложения)",
-  "risk_note": "предупреждение о рисках, если есть",
-  "suggested_entry": число или null,
-  "suggested_tp": число или null,
-  "suggested_sl": число или null
+  "risk_note": "предупреждение о рисках, если есть"
 }
 
 Правила:
@@ -30,15 +27,7 @@ SYSTEM_PROMPT = """Ты — профессиональный крипто-ана
 """
 
 
-async def analyze_setup(
-    symbol: str,
-    price: float,
-    rsi: float,
-    macd_positive: bool,
-    trend_up: bool,
-    news_headlines: list[str],
-    deal_type: str,
-) -> dict:
+async def analyze_setup(symbol, price, rsi, macd_positive, trend_up, news_headlines, deal_type):
     news_text = "\n".join(f"- {h}" for h in news_headlines[:5]) or "Новостей нет."
 
     user_prompt = f"""Монета: {symbol}
@@ -46,7 +35,7 @@ async def analyze_setup(
 Текущая цена: {price}
 RSI: {rsi}
 MACD положительный: {macd_positive}
-Тренд восходящий (цена выше EMA200): {trend_up}
+Тренд восходящий: {trend_up}
 
 Последние новости:
 {news_text}
@@ -71,16 +60,8 @@ MACD положительный: {macd_positive}
                 content = content[4:]
         content = content.strip()
 
-        result = json.loads(content)
-        return result
+        return json.loads(content)
 
-    except json.JSONDecodeError:
-        return {
-            "signal": "no_signal",
-            "confidence": "low",
-            "reason": "ИИ вернул невалидный ответ",
-            "risk_note": "Пропущено",
-        }
     except Exception as e:
         return {
             "signal": "no_signal",
