@@ -1,73 +1,62 @@
 import json
-import os
-from openai import AsyncOpenAI
-
+from openai import OpenAI
 from config import GROQ_API_KEY, GROQ_MODEL
 
 
-client = AsyncOpenAI(
+# Клиент Groq (совместим с OpenAI-форматом)
+client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
 )
 
 
-SYSTEM_PROMPT = """Ты — профессиональный крипто-аналитик. Твоя задача — оценить потенциальный LONG-сетап по монете.
+SYSTEM_PROMPT = """Ты — профессиональный крипто-аналитик. Твоя задача — оценить торговый сетап 
+по монете на основе технических данных и новостного фона.
 
-Тебе дают:
-- Символ монеты
-- Тип сделки (скальп / среднесрок / долгосрок)
-- Технические данные (RSI, MACD, EMA, цена, объём)
-- Свежие новости по монете и по рынку
-
-Ты должен вернуть СТРОГО JSON в таком формате:
+Ты должен ответить ТОЛЬКО валидным JSON без лишнего текста. Формат:
 {
-  "verdict": "long" | "skip",
-  "confidence": 0.0-1.0,
+  "signal": "long" | "no_signal",
+  "confidence": "high" | "medium" | "low",
   "reason": "краткое объяснение на русском (1-2 предложения)",
-  "risk_level": "low" | "medium" | "high",
-  "news_summary": "краткая выжимка из новостей на русском (1 предложение)"
+  "risk_note": "предупреждение о рисках, если есть",
+  "suggested_entry": число или null,
+  "suggested_tp": число или null,
+  "suggested_sl": число или null
 }
 
 Правила:
-- "long" — только если новости не противоречат росту и технические данные подтверждают.
-- confidence: 0.8+ — сильный сигнал, 0.5-0.8 — средний, <0.5 — слабый.
-- Если новости негативные (взлом, делистинг, регуляторные проблемы) — verdict = "skip".
-- Если новостей нет — оценивай только по технике, но снижай confidence на 0.1.
-- Отвечай ТОЛЬКО JSON, без markdown и комментариев.
+- "long" — если новости позитивные И технические данные подтверждают рост.
+- "no_signal" — если новости негативные, нейтральные или противоречат технике.
+- confidence: high = всё совпадает, medium = есть сомнения, low = много рисков.
+- suggested_entry/tp/sl указывай только если можешь дать адекватные уровни.
 """
 
 
-async def analyze_signal(
+async def analyze_setup(
     symbol: str,
-    trade_type: str,
-    technical_data: dict,
-    news: list[dict],
-) -> dict | None:
+    price: float,
+    rsi: float,
+    macd_positive: bool,
+    trend_up: bool,
+    news_headlines: list[str],
+    deal_type: str,
+) -> dict:
     """
-    Отправить данные в Groq и получить вердикт.
-
-    technical_data: {rsi, macd, ema_trend, price, volume_24h, conditions_met}
-    news: список {title, source, published_at}
+    Отправить данные в Groq и получить вердикт ИИ.
     """
-    news_text = "\n".join(
-        f"- {n['title']} ({n.get('source', 'unknown')})" for n in news[:10]
-    ) or "Новостей не найдено."
+    news_text = "\n".join(f"- {h}" for h in news_headlines[:5]) or "Новостей нет."
 
-    user_prompt = f"""
-Монета: {symbol}
-Тип сделки: {trade_type}
+    user_prompt = f"""Монета: {symbol}
+Тип сделки: {deal_type}
+Текущая цена: {price}
+RSI: {rsi}
+MACD положительный: {macd_positive}
+Тренд восходящий (цена выше EMA200): {trend_up}
 
-Технические данные:
-- Цена: {technical_data.get('price')}
-- RSI: {technical_data.get('rsi')}
-- MACD histogram: {technical_data.get('macd')}
-- EMA(200) тренд: {technical_data.get('ema_trend')}
-- Объём за 24ч (USDT): {technical_data.get('volume_24h')}
-- Совпало условий: {technical_data.get('conditions_met')}
-
-Свежие новости:
+Последние новости:
 {news_text}
-"""
+
+Оцени, стоит ли открывать Long. Ответь только JSON."""
 
     try:
         response = await client.chat.completions.create(
@@ -77,19 +66,30 @@ async def analyze_signal(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=400,
-            response_format={"type": "json_object"},
+            max_tokens=500,
         )
+        content = response.choices[0].message.content.strip()
 
-        raw = response.choices[0].message.content
-        result = json.loads(raw)
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        content = content.strip()
 
-        # Валидация
-        if result.get("verdict") not in ("long", "skip"):
-            return None
-        result["confidence"] = float(result.get("confidence", 0))
+        result = json.loads(content)
         return result
 
+    except json.JSONDecodeError:
+        return {
+            "signal": "no_signal",
+            "confidence": "low",
+            "reason": "ИИ вернул невалидный ответ",
+            "risk_note": "Пропущено",
+        }
     except Exception as e:
-        print(f"AI analyze error for {symbol}: {e}")
-        return None
+        return {
+            "signal": "no_signal",
+            "confidence": "low",
+            "reason": f"Ошибка ИИ: {str(e)[:100]}",
+            "risk_note": "Пропущено",
+        }
