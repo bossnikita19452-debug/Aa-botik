@@ -32,7 +32,7 @@ bot = Bot(
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-MY_CHAT_ID = 396041420 # ← ВСТАВЬТЕ СВОЙ TELEGRAM ID
+MY_CHAT_ID = 396041420  # ← ваш ID
 
 # Хранилище отправленных сигналов
 sent_signals: dict = {}
@@ -166,7 +166,7 @@ async def cb_btc_day(call: CallbackQuery):
     )
 
     try:
-        response = ai_client.chat.completions.create(
+        response = await ai_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
@@ -200,7 +200,6 @@ async def run_scan():
         logger.info(f"Найдено сигналов: {len(signals)}")
 
         for s in signals:
-            # Пропускаем отключённые типы
             if s["type"] in settings and not settings[s["type"]]:
                 continue
 
