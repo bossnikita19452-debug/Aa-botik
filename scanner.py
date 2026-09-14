@@ -20,7 +20,7 @@ MAX_SYMBOLS = 50
 async def get_all_futures_symbols() -> list[str]:
     """Получить список фьючерсных пар BingX через библиотеку."""
     try:
-        async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY, base_url="https://api.bingx.com") as client:
+        async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY) as client:
             response = await client.swap_v2_public_get_quote_contracts()
             symbols = []
             for item in response.get("data", []):
@@ -36,7 +36,7 @@ async def get_all_futures_symbols() -> list[str]:
 async def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
     """Получить свечи через библиотеку BingX."""
     try:
-        async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY, base_url="https://api.bingx.com") as client:
+        async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY) as client:
             response = await client.swap_v2_public_get_quote_klines(
                 params={"symbol": symbol, "interval": interval, "limit": limit}
             )
