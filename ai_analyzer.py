@@ -2,14 +2,8 @@ import json
 from openai import AsyncOpenAI
 from config import GROQ_API_KEY, GROQ_MODEL
 
+
 client = AsyncOpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=GROQ_API_KEY,
-)
-
-
-# Клиент Groq (совместим с OpenAI-форматом)
-client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY,
 )
@@ -33,7 +27,6 @@ SYSTEM_PROMPT = """Ты — профессиональный крипто-ана
 - "long" — если новости позитивные И технические данные подтверждают рост.
 - "no_signal" — если новости негативные, нейтральные или противоречат технике.
 - confidence: high = всё совпадает, medium = есть сомнения, low = много рисков.
-- suggested_entry/tp/sl указывай только если можешь дать адекватные уровни.
 """
 
 
@@ -46,9 +39,6 @@ async def analyze_setup(
     news_headlines: list[str],
     deal_type: str,
 ) -> dict:
-    """
-    Отправить данные в Groq и получить вердикт ИИ.
-    """
     news_text = "\n".join(f"- {h}" for h in news_headlines[:5]) or "Новостей нет."
 
     user_prompt = f"""Монета: {symbol}
