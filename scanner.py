@@ -53,9 +53,21 @@ async def get_klines(session: aiohttp.ClientSession, symbol: str, interval: str,
         "/openApi/swap/v3/quote/klines",
         {"symbol": symbol, "interval": interval, "limit": limit},
     )
+
+    # Отладка: показываем, что вернул BingX
+    if not isinstance(data, dict):
+        print(f"DEBUG {symbol} {interval}: ответ не dict: {type(data)}")
+        return pd.DataFrame()
+
+    if data.get("code") not in (0, "0", None):
+        print(f"DEBUG {symbol} {interval}: code={data.get('code')} msg={data.get('msg')}")
+        return pd.DataFrame()
+
     rows = data.get("data", [])
     if not rows:
+        print(f"DEBUG {symbol} {interval}: пустой data, ответ={str(data)[:200]}")
         return pd.DataFrame()
+
     df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume", "close_time"])
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
