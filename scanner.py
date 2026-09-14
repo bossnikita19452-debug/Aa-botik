@@ -13,11 +13,10 @@ from config import (
 )
 from indicators import calculate_ema, calculate_rsi, calculate_macd
 from news_scanner import get_news_for_coin
-from ai_analyzer import analyze_signal as analyze_setup
+from ai_analyzer import analyze_setup
 from risk_calculator import calculate_tp_sl, is_rr_valid
 
 
-# ─── Подпись запросов BingX ────────────────────────────────────────
 def _sign(params: str) -> str:
     return hmac.new(
         BINGX_SECRET_KEY.encode("utf-8"),
@@ -60,7 +59,6 @@ async def get_klines(session: aiohttp.ClientSession, symbol: str, interval: str,
     return df.dropna()
 
 
-# ─── Технические проверки ─────────────────────────────────────────
 def check_scalp(df_5m, df_15m):
     if len(df_5m) < 100 or len(df_15m) < 30:
         return None
@@ -150,7 +148,6 @@ def check_longterm(df_1d):
     }
 
 
-# ─── Главная функция ──────────────────────────────────────────────
 async def scan_all() -> list[dict]:
     signals = []
     async with aiohttp.ClientSession() as session:
@@ -171,7 +168,6 @@ async def scan_all() -> list[dict]:
                 if volume_24h < MIN_VOLUME_USDT:
                     continue
 
-                # Технические проверки (только включённые типы)
                 candidates = []
                 if SCALP_ENABLED:
                     c = check_scalp(df_5m, df_15m)
@@ -189,12 +185,9 @@ async def scan_all() -> list[dict]:
                 if not candidates:
                     continue
 
-                # Новости по монете
                 news = await get_news_for_coin(session, symbol)
 
-                # Для каждого кандидата — ИИ-анализ и расчёт TP/SL
                 for cand in candidates:
-                    # Выбираем свечи для ATR под тип сделки
                     if cand["type"] == "scalp":
                         df_for_atr = df_15m
                     elif cand["type"] == "swing":
@@ -206,12 +199,10 @@ async def scan_all() -> list[dict]:
                     if not levels:
                         continue
 
-                    # Проверка RR
                     if not is_rr_valid(levels["rr"], MIN_RR, MAX_RR):
                         continue
 
-                    # ИИ-анализ
-                    ai_result = analyze_setup(
+                    ai_result = await analyze_setup(
                         symbol=symbol,
                         price=cand["price"],
                         rsi=cand["rsi"],
@@ -240,14 +231,12 @@ async def scan_all() -> list[dict]:
                         "risk_note": ai_result.get("risk_note", ""),
                     })
 
-                    # Небольшая пауза между ИИ-запросами (лимиты Groq)
                     await asyncio.sleep(1)
 
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
                 continue
 
-    # Сортировка: сначала high confidence
     conf_order = {"high": 0, "medium": 1, "low": 2}
     signals.sort(key=lambda s: conf_order.get(s["confidence"], 3))
     return signals
