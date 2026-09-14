@@ -59,6 +59,7 @@ async def get_klines(session: aiohttp.ClientSession, symbol: str, interval: str,
     return df.dropna()
 
 
+# ─── Ослабленные технические проверки ─────────────────────────────
 def check_scalp(df_5m, df_15m):
     if len(df_5m) < 100 or len(df_15m) < 30:
         return None
@@ -69,9 +70,9 @@ def check_scalp(df_5m, df_15m):
     _, _, macd_hist = calculate_macd(df_15m)
     macd_pos = macd_hist.iloc[-1] > 0
 
-    conditions = [close > ema50, close > ema100, rsi > 50, macd_pos]
+    conditions = [close > ema50, close > ema100, rsi > 45, macd_pos]
     met = sum(conditions)
-    if met < 3:
+    if met < 2:
         return None
 
     return {
@@ -97,13 +98,13 @@ def check_swing(df_1h, df_4h):
     macd_pos = macd_hist.iloc[-1] > 0
 
     conditions = [
-        close > ema200,
-        50 <= rsi <= 65,
+        close > ema200 * 0.97,
+        40 <= rsi <= 70,
         macd_pos,
         df_4h["close"].iloc[-1] > df_4h["close"].iloc[-2],
     ]
     met = sum(conditions)
-    if met < 3:
+    if met < 2:
         return None
 
     return {
@@ -127,12 +128,12 @@ def check_longterm(df_1d):
     rsi = calculate_rsi(df_1d, 14).iloc[-1]
 
     conditions = [
-        close > ema200,
-        50 <= rsi <= 70,
+        close > ema200 * 0.95,
+        35 <= rsi <= 75,
         df_1d["close"].iloc[-1] > df_1d["close"].iloc[-5],
     ]
     met = sum(conditions)
-    if met < 2:
+    if met < 1:
         return None
 
     return {
@@ -152,6 +153,8 @@ async def scan_all() -> list[dict]:
     signals = []
     async with aiohttp.ClientSession() as session:
         symbols = await get_all_futures_symbols(session)
+        logger_msg = f"Сканирую {len(symbols)} монет"
+        print(logger_msg)
 
         for symbol in symbols:
             try:
@@ -185,6 +188,7 @@ async def scan_all() -> list[dict]:
                 if not candidates:
                     continue
 
+                # Новости и ИИ-анализ — только для монет, прошедших технику
                 news = await get_news_for_coin(session, symbol)
 
                 for cand in candidates:
