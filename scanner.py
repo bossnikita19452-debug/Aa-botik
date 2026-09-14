@@ -17,6 +17,9 @@ from ai_analyzer import analyze_setup
 from risk_calculator import calculate_tp_sl, is_rr_valid
 
 
+MAX_SYMBOLS = 50  # ограничение на количество монет для скорости
+
+
 def _sign(params: str) -> str:
     return hmac.new(
         BINGX_SECRET_KEY.encode("utf-8"),
@@ -59,7 +62,6 @@ async def get_klines(session: aiohttp.ClientSession, symbol: str, interval: str,
     return df.dropna()
 
 
-# ─── Ослабленные технические проверки ─────────────────────────────
 def check_scalp(df_5m, df_15m):
     if len(df_5m) < 100 or len(df_15m) < 30:
         return None
@@ -152,9 +154,9 @@ def check_longterm(df_1d):
 async def scan_all() -> list[dict]:
     signals = []
     async with aiohttp.ClientSession() as session:
-        symbols = await get_all_futures_symbols(session)
-        logger_msg = f"Сканирую {len(symbols)} монет"
-        print(logger_msg)
+        all_symbols = await get_all_futures_symbols(session)
+        symbols = all_symbols[:MAX_SYMBOLS]
+        print(f"Сканирую {len(symbols)} монет из {len(all_symbols)}")
 
         for symbol in symbols:
             try:
@@ -188,7 +190,6 @@ async def scan_all() -> list[dict]:
                 if not candidates:
                     continue
 
-                # Новости и ИИ-анализ — только для монет, прошедших технику
                 news = await get_news_for_coin(session, symbol)
 
                 for cand in candidates:
