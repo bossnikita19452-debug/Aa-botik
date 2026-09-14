@@ -118,7 +118,7 @@ async def cb_settings(call: CallbackQuery):
     try:
         await.error call.message.edit_text(
             "⚙️ <b>Настройки типов(f сделок</b>",
-            reply_markup="settings_menu(),
+            reply_markup=settings_menu(),
         )
     exceptО TelegramBadRequest:
         pass
