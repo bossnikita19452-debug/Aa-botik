@@ -1,17 +1,16 @@
 import aiohttp
 
 
-NEWS_API = "https://min-api.cryptocompare.com/data/v2/news/"
+BASE_URL = "https://cryptocurrency.cv"
 
 
-async def _fetch_news(session: aiohttp.ClientSession, categories: str = "", limit: int = 5) -> list[str]:
-    """Базовый запрос новостей к CryptoCompare."""
-    params = {"lang": "EN"}
-    if categories:
-        params["categories"] = categories
+async def _fetch_news(session: aiohttp.ClientSession, endpoint: str, limit: int = 5) -> list[str]:
+    """Базовый запрос новостей к cryptocurrency.cv."""
+    url = f"{BASE_URL}/api/{endpoint}"
+    params = {"limit": limit}
 
     try:
-        async with session.get(NEWS_API, params=params, timeout=10) as resp:
+        async with session.get(url, params=params, timeout=10) as resp:
             if resp.status != 200:
                 return []
             data = await resp.json()
@@ -19,7 +18,8 @@ async def _fetch_news(session: aiohttp.ClientSession, categories: str = "", limi
         return []
 
     headlines = []
-    for item in data.get("Data", [])[:limit]:
+    articles = data.get("articles", data.get("data", []))
+    for item in articles[:limit]:
         title = item.get("title")
         if title:
             headlines.append(title)
@@ -31,14 +31,15 @@ async def get_news_for_coin(session: aiohttp.ClientSession, symbol: str, limit: 
     coin = symbol.split("-")[0].upper()
     if coin in ("USDT", "USDC", "BUSD", "DAI"):
         return []
-    return await _fetch_news(session, categories=coin, limit=limit)
+    # Для конкретной монеты используем поиск
+    return await _fetch_news(session, f"search?q={coin}", limit=limit)
 
 
 async def get_global_crypto_news(session: aiohttp.ClientSession, limit: int = 5) -> list[str]:
     """Общие новости крипторынка."""
-    return await _fetch_news(session, limit=limit)
+    return await _fetch_news(session, "news", limit=limit)
 
 
 async def get_bitcoin_news(session: aiohttp.ClientSession, limit: int = 10) -> list[str]:
     """Новости по BTC."""
-    return await _fetch_news(session, categories="BTC", limit=limit)
+    return await _fetch_news(session, "bitcoin", limit=limit)
