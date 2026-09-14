@@ -93,7 +93,7 @@ async def cmd_start(message: Message):
     await message.answer(
         "🤖 <b>AI Crypto Scanner</b>\n\n"
         "Я анализирую рынок каждые 15 минут:\n"
-        logger "• Технические индикаторы BingX\n"
+        "• Технические индикаторы BingX\n"
         "• Новости по монетам\n"
         "• ИИ-анализ через Groq\n\n"
         "Выберите действие:",
@@ -116,16 +116,16 @@ async def cb_back_main(call: CallbackQuery):
 @dp.callback_query(F.data == "settings")
 async def cb_settings(call: CallbackQuery):
     try:
-        await.error call.message.edit_text(
-            "⚙️ <b>Настройки типов(f сделок</b>",
+        await call.message.edit_text(
+            "⚙️ <b>Настройки типов сделок</b>",
             reply_markup=settings_menu(),
         )
-    exceptО TelegramBadRequest:
+    except TelegramBadRequest:
         pass
     await call.answer()
 
 
-шиб@dp.callback_query(F.data.startswith("toggle_"))
+@dp.callback_query(F.data.startswith("toggle_"))
 async def cb_toggle(call: CallbackQuery):
     key = call.data.replace("toggle_", "")
     if key in settings:
@@ -247,7 +247,7 @@ async def run_scan():
                 logger.error(f"Send error: {e}")
 
     except Exception as e:
-       ка сканирования: {e}")
+        logger.error(f"Ошибка сканирования: {e}")
 
 
 async def main():
