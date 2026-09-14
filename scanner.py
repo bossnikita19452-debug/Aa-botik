@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
 import pandas as pd
-from bingx_py import BingXClient, exceptions
+from bingx_py import BingXClient
 
 from config import (
     BINGX_API_KEY, BINGX_SECRET_KEY,
@@ -21,7 +21,8 @@ async def get_all_futures_symbols() -> list[str]:
     """Получить список фьючерсных пар BingX через библиотеку."""
     try:
         async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY) as client:
-            response = await client.swap_v2_public_get_quote_contracts()
+            # Правильный вызов метода для фьючерсов
+            response = await client.swap.get_contracts()
             symbols = []
             for item in response.get("data", []):
                 symbol = item.get("symbol", "")
@@ -37,9 +38,8 @@ async def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFra
     """Получить свечи через библиотеку BingX."""
     try:
         async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY) as client:
-            response = await client.swap_v2_public_get_quote_klines(
-                params={"symbol": symbol, "interval": interval, "limit": limit}
-            )
+            # Правильный вызов метода для свечей
+            response = await client.market.get_klines_v3(symbol, interval, limit)
 
         if not isinstance(response, dict) or response.get("code") != 0:
             return pd.DataFrame()
