@@ -13,7 +13,7 @@ from config import (
 )
 from indicators import calculate_ema, calculate_rsi, calculate_macd
 from news_scanner import get_news_for_coin
-from ai_analyzer import analyze_setup
+from ai_analyzer import analyze_signal as analyze_setup
 from risk_calculator import calculate_tp_sl, is_rr_valid
 
 
