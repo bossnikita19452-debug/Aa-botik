@@ -8,7 +8,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # ─── Groq (ИИ) ────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "llama-3.3-70b-versatile"  # бесплатно, 1000 запросов/день
+GROQ_MODEL = "openai/gpt-oss-120b" # бесплатно, 1000 запросов/день
 
 # ─── BingX (публичные данные) ─────────────────────────────────────
 BINGX_API_KEY = os.getenv("BINGX_API_KEY", "")
