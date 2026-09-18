@@ -1,264 +1,181 @@
 import asyncio
 import logging
-from datetime import datetime
-
-import aiohttp
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-)
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import (
-    TELEGRAM_BOT_TOKEN, SCAN_INTERVAL_MINUTES,
-    SCALP_ENABLED, SWING_ENABLED, LONGTERM_ENABLED,
-    GROQ_MODEL,
+import config
+from config import TELEGRAM_BOT_TOKEN, ADMIN_IDS, CHANNEL_ID
+from database import (
+    init_db, get_active_signals, get_recent_signals,
+    get_stats, count_open_positions,
 )
-from scanner import scan_all
-from news_scanner import get_bitcoin_news, get_global_crypto_news
-from ai_analyzer import client as ai_client
+from scanner import scan_once
+from stats_checker import check_open_signals, set_bot
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-bot = Bot(
-    token=TELEGRAM_BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-)
-dp = Dispatcher()
-scheduler = AsyncIOScheduler()
 
-MY_CHAT_ID = 396041420  # ← ваш ID
-
-sent_signals: dict = {}
-
-settings = {
-    "scalp": SCALP_ENABLED,
-    "swing": SWING_ENABLED,
-    "longterm": LONGTERM_ENABLED,
-}
-
-
-def confidence_emoji(conf: str) -> str:
-    return {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(conf, "⚪")
-
-
-def format_signal(s: dict) -> str:
-    emoji = confidence_emoji(s["confidence"])
-    return (
-        f"{emoji} <b>LONG SIGNAL | BingX</b>\n\n"
-        f"💎 Монета: <code>{s['symbol']}</code>\n"
-        f"📊 Тип: {s['type_label']}\n"
-        f"📈 Таймфрейм: {s['timeframe']}\n\n"
-        f"💰 Вход: <code>{s['entry']}</code>\n"
-        f"🎯 Take Profit: <code>{s['tp']}</code>\n"
-        f"🛑 Stop Loss: <code>{s['sl']}</code>\n"
-        f"⚖️ RR: <b>1:{s['rr']}</b>\n\n"
-        f"📊 RSI: {s['rsi']}\n"
-        f"🧠 Уверенность: <b>{s['confidence']}</b>\n\n"
-        f"💬 {s['reason']}\n"
-        f"⚠️ {s['risk_note']}"
-    )
-
-
-def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🪙 Биткоин дня", callback_data="btc_day")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
-        [InlineKeyboardButton(text="📰 Новости рынка", callback_data="news")],
-        [InlineKeyboardButton(text="🔄 Обновить сканирование", callback_data="rescan")],
+def main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Последние сигналы", callback_data="last_signals")],
+        [InlineKeyboardButton("📈 Статистика", callback_data="stats")],
+        [InlineKeyboardButton("⚙️ Панель управления", callback_data="admin_panel")],
     ])
 
 
-def settings_menu() -> InlineKeyboardMarkup:
-    def label(name: str, key: str) -> str:
-        return f"{'✅' if settings[key] else '❌'} {name}"
-
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label("Скальп", "scalp"), callback_data="toggle_scalp")],
-        [InlineKeyboardButton(text=label("Среднесрок", "swing"), callback_data="toggle_swing")],
-        [InlineKeyboardButton(text=label("Долгосрок", "longterm"), callback_data="toggle_longterm")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")],
-    ])
-
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer(
-        "🤖 <b>AI Crypto Scanner</b>\n\n"
-        "Я анализирую рынок каждые 15 минут:\n"
-        "• Технические индикаторы BingX\n"
-        "• Новости по монетам\n"
-        "• ИИ-анализ через Groq\n\n"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 <b>Breakout + Volume Bot</b>\n\n"
+        "Стратегия: пробой консолидаций на повышенном объёме.\n"
+        "Таймфрейм: M15. Направления: LONG + SHORT.\n\n"
         "Выберите действие:",
-        reply_markup=main_menu(),
+        parse_mode="HTML",
+        reply_markup=main_menu()
     )
 
 
-@dp.callback_query(F.data == "back_main")
-async def cb_back_main(call: CallbackQuery):
-    try:
-        await call.message.edit_text(
-            "🤖 <b>AI Crypto Scanner</b>\n\nВыберите действие:",
-            reply_markup=main_menu(),
-        )
-    except TelegramBadRequest:
-        pass
-    await call.answer()
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
 
-
-@dp.callback_query(F.data == "settings")
-async def cb_settings(call: CallbackQuery):
-    try:
-        await call.message.edit_text(
-            "⚙️ <b>Настройки типов сделок</b>",
-            reply_markup=settings_menu(),
-        )
-    except TelegramBadRequest:
-        pass
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("toggle_"))
-async def cb_toggle(call: CallbackQuery):
-    key = call.data.replace("toggle_", "")
-    if key in settings:
-        settings[key] = not settings[key]
-    try:
-        await call.message.edit_reply_markup(reply_markup=settings_menu())
-    except TelegramBadRequest:
-        pass
-    await call.answer(f"{key}: {'вкл' if settings[key] else 'выкл'}")
-
-
-@dp.callback_query(F.data == "stats")
-async def cb_stats(call: CallbackQuery):
-    total = len(sent_signals)
-    try:
-        await call.message.edit_text(
-            f"📊 <b>Статистика</b>\n\n"
-            f"Отправлено сигналов (текущая сессия): <b>{total}</b>\n"
-            f"Последнее сканирование: <b>{datetime.now().strftime('%H:%M')}</b>",
-            reply_markup=main_menu(),
-        )
-    except TelegramBadRequest:
-        pass
-    await call.answer()
-
-
-@dp.callback_query(F.data == "news")
-async def cb_news(call: CallbackQuery):
-    await call.answer("Загружаю новости...")
-    async with aiohttp.ClientSession() as session:
-        news = await get_global_crypto_news(session, limit=5)
-    text = "📰 <b>Последние новости крипторынка</b>\n\n" + "\n".join(f"• {n}" for n in news) if news else "Новости не найдены."
-    try:
-        await call.message.edit_text(text, reply_markup=main_menu())
-    except TelegramBadRequest:
-        pass
-
-
-@dp.callback_query(F.data == "btc_day")
-async def cb_btc_day(call: CallbackQuery):
-    await call.answer("Анализирую BTC...")
-    async with aiohttp.ClientSession() as session:
-        news = await get_bitcoin_news(session, limit=8)
-
-    prompt = (
-        "Ты крипто-аналитик. На основе этих новостей по BTC сделай краткий прогноз "
-        "на сегодня на русском (3-4 предложения). Что можно ждать от биткоина: рост, "
-        "падение или боковик? Какие риски?\n\nНовости:\n" + "\n".join(f"- {n}" for n in news)
-    )
-
-    try:
-        response = await ai_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=400,
-        )
-        answer = response.choices[0].message.content
-    except Exception as e:
-        answer = f"Ошибка анализа: {e}"
-
-    try:
-        await call.message.edit_text(
-            f"🪙 <b>Биткоин дня</b>\n\n{answer}",
-            reply_markup=main_menu(),
-        )
-    except TelegramBadRequest:
-        pass
-
-
-@dp.callback_query(F.data == "rescan")
-async def cb_rescan(call: CallbackQuery):
-    await call.answer("Запускаю сканирование...")
-    try:
-        await call.message.edit_text(
-            "🔄 Сканирование запущено. Результат придёт отдельным сообщением.",
-            reply_markup=main_menu(),
-        )
-    except TelegramBadRequest:
-        pass
-    asyncio.create_task(run_scan())
-
-
-async def run_scan():
-    logger.info(f"Начинаю сканирование: {datetime.now()}")
-    try:
-        signals = await scan_all()
-        logger.info(f"Найдено сигналов: {len(signals)}")
-
+    if data == "last_signals":
+        signals = get_recent_signals(10)
+        if not signals:
+            await query.edit_message_text("Пока нет сигналов.")
+            return
+        status_map = {"win": "✅", "loss": "❌", "expired": "⏰", "active": "⏳"}
+        text = "<b>Последние 10 сигналов:</b>\n\n"
         for s in signals:
-            if s["type"] in settings and not settings[s["type"]]:
-                continue
+            # 0=id, 1=symbol, 2=direction, 3=entry, 4=stop, 5=take, 6=risk_distance, ...
+            emoji = status_map.get(s[9], "⚪")
+            dir_emoji = "🟢" if s[2] == "LONG" else "🔴"
+            text += f"{emoji} {dir_emoji} {s[1]} | Entry {s[3]:.4f}\n"
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
 
-            key = (s["symbol"], s["type"])
-            text = format_signal(s)
+    elif data == "stats":
+        st = get_stats()
+        closed = st["win"] + st["loss"]
+        winrate = round(st["win"] / closed * 100, 1) if closed > 0 else 0.0
 
-            if key in sent_signals:
-                old = sent_signals[key]
-                if old["confidence"] != s["confidence"]:
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=MY_CHAT_ID,
-                            message_id=old["message_id"],
-                            text="🔄 <b>Сигнал обновлён</b>\n\n" + text,
-                        )
-                        sent_signals[key]["confidence"] = s["confidence"]
-                    except Exception as e:
-                        logger.error(f"Edit error: {e}")
-                continue
+        long_closed = st["long_win"] + st["long_loss"]
+        short_closed = st["short_win"] + st["short_loss"]
+        long_wr = round(st["long_win"] / long_closed * 100, 1) if long_closed > 0 else 0.0
+        short_wr = round(st["short_win"] / short_closed * 100, 1) if short_closed > 0 else 0.0
 
-            try:
-                msg = await bot.send_message(MY_CHAT_ID, text)
-                sent_signals[key] = {
-                    "message_id": msg.message_id,
-                    "confidence": s["confidence"],
-                }
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Send error: {e}")
+        open_now = count_open_positions()
 
-    except Exception as e:
-        logger.error(f"Ошибка сканирования: {e}")
+        text = (
+            f"📈 <b>Статистика</b>\n\n"
+            f"Всего сигналов: <b>{st['total']}</b>\n"
+            f"✅ TP: <b>{st['win']}</b>\n"
+            f"❌ SL: <b>{st['loss']}</b>\n"
+            f"⏰ Таймаут: <b>{st['expired']}</b>\n"
+            f"⏳ Открыто сейчас: <b>{open_now}</b>\n\n"
+            f"<b>Winrate общий: {winrate}%</b>\n\n"
+            f"🟢 LONG: {long_wr}% ({st['long_win']}/{long_closed})\n"
+            f"🔴 SHORT: {short_wr}% ({st['short_win']}/{short_closed})"
+        )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
+
+    elif data == "admin_panel":
+        if user_id not in ADMIN_IDS:
+            await query.edit_message_text("Доступ запрещён.")
+            return
+        status = "▶️ Активно" if config.SCANNING_ENABLED else "⏸ Остановлено"
+        toggle_text = "⏸ Остановить сканер" if config.SCANNING_ENABLED else "▶️ Возобновить сканер"
+        keyboard = [
+            [InlineKeyboardButton(f"Сканер: {status}", callback_data="noop")],
+            [InlineKeyboardButton(toggle_text, callback_data="toggle_scan")],
+            [InlineKeyboardButton("🔄 Сканировать сейчас", callback_data="force_scan")],
+            [InlineKeyboardButton("🔍 Проверить позиции", callback_data="check_trades")],
+            [InlineKeyboardButton("« Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(
+            "⚙️ <b>Панель управления</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "toggle_scan":
+        if user_id not in ADMIN_IDS:
+            return
+        config.SCANNING_ENABLED = not config.SCANNING_ENABLED
+        status = "▶️ активно" if config.SCANNING_ENABLED else "⏸ остановлено"
+        await query.answer(f"Сканирование {status}")
+        status_label = "▶️ Активно" if config.SCANNING_ENABLED else "⏸ Остановлено"
+        toggle_text = "⏸ Остановить сканер" if config.SCANNING_ENABLED else "▶️ Возобновить сканер"
+        keyboard = [
+            [InlineKeyboardButton(f"Сканер: {status_label}", callback_data="noop")],
+            [InlineKeyboardButton(toggle_text, callback_data="toggle_scan")],
+            [InlineKeyboardButton("🔄 Сканировать сейчас", callback_data="force_scan")],
+            [InlineKeyboardButton("🔍 Проверить позиции", callback_data="check_trades")],
+            [InlineKeyboardButton("« Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(
+            "⚙️ <b>Панель управления</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "noop":
+        await query.answer()
+
+    elif data == "force_scan":
+        if user_id not in ADMIN_IDS:
+            return
+        await query.edit_message_text("🔄 Сканирую...")
+        await scan_once(context.bot)
+        await query.edit_message_text("✅ Сканирование завершено.", reply_markup=main_menu())
+
+    elif data == "check_trades":
+        if user_id not in ADMIN_IDS:
+            return
+        await query.edit_message_text("🔍 Проверяю позиции...")
+        await check_open_signals(chat_id=CHANNEL_ID)
+        await query.edit_message_text("✅ Проверка завершена.", reply_markup=main_menu())
+
+    elif data == "back_main":
+        await query.edit_message_text(
+            "Выберите действие:",
+            reply_markup=main_menu()
+        )
 
 
 async def main():
-    scheduler.add_job(run_scan, "interval", minutes=SCAN_INTERVAL_MINUTES)
+    init_db()
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    set_bot(app.bot)
+
+    scheduler = AsyncIOScheduler()
+    # Сканирование раз в 15 минут (на закрытии свечи M15)
+    scheduler.add_job(scan_once, "interval", minutes=15, args=[app.bot])
+    # Проверка TP/SL каждые 30 секунд
+    scheduler.add_job(
+        check_open_signals, "interval", seconds=30,
+        kwargs={"chat_id": CHANNEL_ID}
+    )
     scheduler.start()
 
-    asyncio.create_task(run_scan())
-
-    logger.info("Бот запущен, ожидаю сообщений...")
-    await dp.start_polling(bot)
+    logger.info("Бот запускается...")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен")
