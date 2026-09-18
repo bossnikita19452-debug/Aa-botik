@@ -10,7 +10,7 @@ from config import (
     LOOKBACK_BARS, MIN_TOUCHES, TOUCH_TOLERANCE,
     VOLUME_MULT_LONG, VOLUME_MULT_SHORT,
     ATR_SL_MULTIPLIER, RR_RATIO,
-    MAX_LEVERAGE, RISK_PER_TRADE_PCT,
+    MAX_LEVERAGE, RISK_PER_TRADE_PCT, MIN_RISK_PCT,
     MAX_OPEN_POSITIONS,
 )
 from database import save_signal, has_open_position, count_open_positions
@@ -18,7 +18,6 @@ from stats_checker import check_open_signals
 
 
 async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int = 1000):
-    """Получить свечи M15 с Bybit."""
     params = {
         "category": BYBIT_CATEGORY,
         "symbol": symbol,
@@ -57,11 +56,14 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
         return None
 
     btc_close = df_btc["close"].iloc[-1]
-    btc_ema50 = df_btc["close"].ewm(span=BTC_EMA_PERIOD).mean().iloc[-1]
-    btc_is_bullish = btc_close > btc_ema50
+    btc_ema50 = df:
+_btc["close"].ewm(span=BTC       _EMA_PERIOD).mean().iloc[-1 return]
+    btc_is_bullish = btc_close None > btc_ema50
 
-    close = df_alt["close"].iloc[-1]
-    volume = df_alt["volume"].iloc[-1]
+    close = df_
+
+alt["close"].iloc[-1]
+       volume = df_alt["volume"].iloc[-1]
     vol_sma20 = df_alt["volume"].rolling(VOLUME_SMA_PERIOD).mean().iloc[-1]
     atr14 = (df_alt["high"] - df_alt["low"]).rolling(ATR_PERIOD).mean().iloc[-1]
     ema200_h1 = df_alt["close"].ewm(span=ALT_EMA_PERIOD).mean().iloc[-1]
@@ -72,10 +74,7 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
     last_48_highs = df_alt["high"].iloc[-LOOKBACK_BARS - 1:-1]
     last_48_lows = df_alt["low"].iloc[-LOOKBACK_BARS - 1:-1]
 
-    if len(last_48_highs) < LOOKBACK_BARS or len(last_48_lows) < LOOKBACK_BARS:
-        return None
-
-    resistance = last_48_highs.max()
+    if len(last_48_highs) < LOOKBACK_BARS or len(last_48_lows) < LOOKBACK_BARS resistance = last_48_highs.max()
     support = last_48_lows.min()
 
     resistance_touches = (last_48_highs >= resistance * (1 - TOUCH_TOLERANCE)).sum()
@@ -153,18 +152,20 @@ async def scan_once(bot):
 
             signal = check_signal(df_alt, df_btc, symbol)
             if signal:
+                risk_pct = signal["risk_distance"] / signal["entry"] * 100
+
+                # Фильтр по минимальному риску
+                if risk_pct < MIN_RISK_PCT:
+                    print(f"⛔ {symbol}: риск {risk_pct:.2f}% < {MIN_RISK_PCT}% — пропуск")
+                    continue
+
                 save_signal(signal)
                 found += 1
 
                 # ─── Расчёт позиции и плеча ───────────────────
-                risk_pct = signal["risk_distance"] / signal["entry"] * 100
-                leverage = MAX_LEVERAGE  # всегда 50x из config.py
-                if risk_pct > 0:
-                    position_pct = (RISK_PER_TRADE_PCT / risk_pct) * 100
-                    margin_pct = position_pct / leverage
-                else:
-                    position_pct = 0
-                    margin_pct = 0
+                leverage = MAX_LEVERAGE  # из config.py = 50
+                position_pct = (RISK_PER_TRADE_PCT / risk_pct) * 100
+                margin_pct = position_pct / leverage
 
                 print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f} | Риск {risk_pct:.2f}% | Плечо {leverage}x")
 
