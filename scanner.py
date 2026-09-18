@@ -9,7 +9,8 @@ from config import (
     BTC_EMA_PERIOD, ALT_EMA_PERIOD, VOLUME_SMA_PERIOD, ATR_PERIOD,
     LOOKBACK_BARS, MIN_TOUCHES, TOUCH_TOLERANCE,
     VOLUME_MULT_LONG, VOLUME_MULT_SHORT,
-    ATR_SL_MULTIPLIER, RR_RATIO, MAX_LEVERAGE,
+    ATR_SL_MULTIPLIER, RR_RATIO,
+    MAX_LEVERAGE, RISK_PER_TRADE_PCT,
     MAX_OPEN_POSITIONS,
 )
 from database import save_signal, has_open_position, count_open_positions
@@ -35,7 +36,6 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int =
         return None
 
     if data.get("retCode") != 0:
-        print(f"⚠️ {symbol}: retCode {data.get('retCode')}")
         return None
 
     rows = data.get("result", {}).get("list", [])
@@ -82,42 +82,32 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
     support_touches = (last_48_lows <= support * (1 + TOUCH_TOLERANCE)).sum()
 
     # LONG
-    c_breakout_up = close > resistance
-    c_vol_long = volume >= (VOLUME_MULT_LONG * vol_sma20)
-
     if (btc_is_bullish and close > ema200_h1
             and resistance_touches >= MIN_TOUCHES
-            and c_breakout_up and c_vol_long):
+            and close > resistance
+            and volume >= VOLUME_MULT_LONG * vol_sma20):
         sl = close - (ATR_SL_MULTIPLIER * atr14)
         risk_dist = close - sl
         tp = close + (RR_RATIO * risk_dist)
         return {
-            "symbol": symbol,
-            "direction": "LONG",
-            "entry": float(close),
-            "stop": float(sl),
-            "take": float(tp),
-            "risk_distance": float(risk_dist),
+            "symbol": symbol, "direction": "LONG",
+            "entry": float(close), "stop": float(sl),
+            "take": float(tp), "risk_distance": float(risk_dist),
             "atr": float(atr14),
         }
 
     # SHORT
-    c_breakout_down = close < support
-    c_vol_short = volume >= (VOLUME_MULT_SHORT * vol_sma20)
-
     if (not btc_is_bullish and close < ema200_h1
             and support_touches >= MIN_TOUCHES
-            and c_breakout_down and c_vol_short):
+            and close < support
+            and volume >= VOLUME_MULT_SHORT * vol_sma20):
         sl = close + (ATR_SL_MULTIPLIER * atr14)
         risk_dist = sl - close
         tp = close - (RR_RATIO * risk_dist)
         return {
-            "symbol": symbol,
-            "direction": "SHORT",
-            "entry": float(close),
-            "stop": float(sl),
-            "take": float(tp),
-            "risk_distance": float(risk_dist),
+            "symbol": symbol, "direction": "SHORT",
+            "entry": float(close), "stop": float(sl),
+            "take": float(tp), "risk_distance": float(risk_dist),
             "atr": float(atr14),
         }
 
@@ -131,7 +121,7 @@ async def scan_once(bot):
 
     open_count = count_open_positions()
     if open_count >= MAX_OPEN_POSITIONS:
-        print(f"⛔ Уже открыто {open_count} позиций (макс {MAX_OPEN_POSITIONS}) — пропуск")
+        print(f"⛔ Уже открыто {open_count}/{MAX_OPEN_POSITIONS} — пропуск")
         return
 
     print(f"=== Сканирование: {datetime.utcnow().isoformat()} ===")
@@ -152,11 +142,8 @@ async def scan_once(bot):
         for symbol in COINS:
             if not config.SCANNING_ENABLED:
                 return
-
             if count_open_positions() >= MAX_OPEN_POSITIONS:
-                print(f"⛔ Достигнут лимит {MAX_OPEN_POSITIONS} позиций — стоп")
                 break
-
             if has_open_position(symbol):
                 continue
 
@@ -169,16 +156,17 @@ async def scan_once(bot):
                 save_signal(signal)
                 found += 1
 
-                # Расчёт плеча
+                # ─── Расчёт позиции и плеча ───────────────────
                 risk_pct = signal["risk_distance"] / signal["entry"] * 100
+                leverage = MAX_LEVERAGE  # всегда 50x
                 if risk_pct > 0:
-                    leverage = round(100 / risk_pct)
-                    if leverage > MAX_LEVERAGE:
-                        leverage = MAX_LEVERAGE
+                    position_pct = (RISK_PER_TRADE_PCT / risk_pct) * 100
+                    margin_pct = position_pct / leverage
                 else:
-                    leverage = 1
+                    position_pct = 0
+                    margin_pct = 0
 
-                print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f} | Плечо {leverage}x")
+                print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f} | Риск {risk_pct:.2f}%")
 
                 emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
                 text = (
@@ -188,8 +176,11 @@ async def scan_once(bot):
                     f"Тейк: <code>{signal['take']:.6f}</code>\n"
                     f"R:R = <b>1:{RR_RATIO}</b>\n"
                     f"ATR: <code>{signal['atr']:.6f}</code>\n"
-                    f"Риск: <b>{risk_pct:.2f}%</b>\n"
-                    f"⚡ Плечо: <b>{leverage}x</b> (стоп = 100% маржи)"
+                    f"Риск: <b>{risk_pct:.2f}%</b>\n\n"
+                    f"⚡ Плечо: <b>{leverage}x</b> (макс)\n"
+                    f"💰 Риск: <b>{RISK_PER_TRADE_PCT}%</b> депозита\n"
+                    f"📊 Размер позиции: <b>{position_pct:.1f}%</b> депозита\n"
+                    f"📌 Маржа: <b>{margin_pct:.2f}%</b> депозита"
                 )
                 if config.CHANNEL_ID:
                     try:
