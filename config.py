@@ -5,26 +5,61 @@ load_dotenv()
 
 # ─── Telegram ─────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
-# ─── Groq (ИИ) ────────────────────────────────────────────────────
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "openai/gpt-oss-120b"  # актуальная модель, 1000 запросов/день
+# ─── Флаг активности сканера ──────────────────────────────────────
+SCANNING_ENABLED = True
 
-# ─── BingX (публичные данные) ─────────────────────────────────────
-BINGX_API_KEY = os.getenv("BINGX_API_KEY", "")
-BINGX_SECRET_KEY = os.getenv("BINGX_SECRET_KEY", "")
-BINGX_BASE_URL = "https://open-api.bingx.com"
+# ─── Параметры стратегии ──────────────────────────────────────────
+TIMEFRAME = "15"             # M15
+SCAN_INTERVAL_MINUTES = 15   # Сканирование на закрытии свечи
+CHECK_INTERVAL_SECONDS = 30  # Проверка TP/SL
 
-# ─── Настройки сканирования ───────────────────────────────────────
-SCAN_INTERVAL_MINUTES = 15
-MIN_VOLUME_USDT = 5_000
+# ─── Параметры индикаторов ────────────────────────────────────────
+BTC_EMA_PERIOD = 50          # EMA 50 на M15 для BTC-фильтра
+ALT_EMA_PERIOD = 800         # EMA 800 на M15 = EMA 200 на H1
+VOLUME_SMA_PERIOD = 20       # Volume SMA 20
+ATR_PERIOD = 14              # ATR 14
 
-# ─── Соотношение риск/прибыль ─────────────────────────────────────
-MIN_RR = 1.0
-MAX_RR = 5.0
+# ─── Параметры пробоя ─────────────────────────────────────────────
+LOOKBACK_BARS = 48           # 48 свечей M15 = 12 часов
+MIN_TOUCHES = 3              # Минимум касаний уровня
+TOUCH_TOLERANCE = 0.002      # 0.2% для подсчёта касаний
 
+# ─── Объёмные фильтры ─────────────────────────────────────────────
+VOLUME_MULT_LONG = 1.8       # Для LONG
+VOLUME_MULT_SHORT = 2.2      # Для SHORT (жёстче)
 
-# ─── Типы сделок ──────────────────────────────────────────────────
-SCALP_ENABLED = True
-SWING_ENABLED = True
-LONGTERM_ENABLED = True
+# ─── Риск-менеджмент ──────────────────────────────────────────────
+ATR_SL_MULTIPLIER = 1.5      # SL = Entry ± 1.5 * ATR
+RR_RATIO = 1.5               # TP = 1.5R
+RISK_PER_TRADE_PCT = 1.0     # 1% от equity
+
+# ─── Лимиты ───────────────────────────────────────────────────────
+MAX_OPEN_POSITIONS = 10      # Максимум одновременных сделок
+MAX_HOLD_BARS = 16           # Таймаут: 16 свечей M15 = 4 часа
+
+# ─── Bybit ────────────────────────────────────────────────────────
+BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
+BYBIT_CATEGORY = "linear"
+
+# ─── Whitelist: 50 монет ─────────────────────────────────────────
+COINS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "SUIUSDT",
+    "APTUSDT", "RENDERUSDT", "FETUSDT", "ARBUSDT", "OPUSDT",
+    "MATICUSDT", "ATOMUSDT", "FTMUSDT", "DOTUSDT", "LTCUSDT",
+    "TIAUSDT", "SEIUSDT", "AAVEUSDT", "STXUSDT", "KASUSDT",
+    "TRXUSDT", "ICPUSDT", "TONUSDT", "GALAUSDT", "DYDXUSDT",
+    "BLURUSDT", "LDOUSDT", "QNTUSDT", "INJUSDT", "JUPUSDT",
+    "WLDUSDT", "PYTHUSDT", "MANTAUSDT", "ZROUSDT", "ENAUSDT",
+    "TAOUSDT", "ORDIUSDT", "ARUSDT", "RUNEUSDT", "ALGOUSDT",
+    "FLOWUSDT", "AXSUSDT", "SANDUSDT", "CHZUSDT", "MINAUSDT",
+]
+
+SIGNAL_EMOJI = {
+    "strong": "🟢",
+    "medium": "🟡",
+    "weak": "🔴",
+}
