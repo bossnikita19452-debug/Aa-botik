@@ -158,7 +158,7 @@ async def scan_once(bot):
 
                 # ─── Расчёт позиции и плеча ───────────────────
                 risk_pct = signal["risk_distance"] / signal["entry"] * 100
-                leverage = MAX_LEVERAGE  # всегда 50x
+                leverage = MAX_LEVERAGE  # всегда 50x из config.py
                 if risk_pct > 0:
                     position_pct = (RISK_PER_TRADE_PCT / risk_pct) * 100
                     margin_pct = position_pct / leverage
@@ -166,7 +166,7 @@ async def scan_once(bot):
                     position_pct = 0
                     margin_pct = 0
 
-                print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f} | Риск {risk_pct:.2f}%")
+                print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f} | Риск {risk_pct:.2f}% | Плечо {leverage}x")
 
                 emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
                 text = (
