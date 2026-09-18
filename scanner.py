@@ -56,14 +56,11 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
         return None
 
     btc_close = df_btc["close"].iloc[-1]
-    btc_ema50 = df:
-_btc["close"].ewm(span=BTC       _EMA_PERIOD).mean().iloc[-1 return]
-    btc_is_bullish = btc_close None > btc_ema50
+    btc_ema50 = df_btc["close"].ewm(span=BTC_EMA_PERIOD).mean().iloc[-1]
+    btc_is_bullish = btc_close > btc_ema50
 
-    close = df_
-
-alt["close"].iloc[-1]
-       volume = df_alt["volume"].iloc[-1]
+    close = df_alt["close"].iloc[-1]
+    volume = df_alt["volume"].iloc[-1]
     vol_sma20 = df_alt["volume"].rolling(VOLUME_SMA_PERIOD).mean().iloc[-1]
     atr14 = (df_alt["high"] - df_alt["low"]).rolling(ATR_PERIOD).mean().iloc[-1]
     ema200_h1 = df_alt["close"].ewm(span=ALT_EMA_PERIOD).mean().iloc[-1]
@@ -74,7 +71,10 @@ alt["close"].iloc[-1]
     last_48_highs = df_alt["high"].iloc[-LOOKBACK_BARS - 1:-1]
     last_48_lows = df_alt["low"].iloc[-LOOKBACK_BARS - 1:-1]
 
-    if len(last_48_highs) < LOOKBACK_BARS or len(last_48_lows) < LOOKBACK_BARS resistance = last_48_highs.max()
+    if len(last_48_highs) < LOOKBACK_BARS or len(last_48_lows) < LOOKBACK_BARS:
+        return None
+
+    resistance = last_48_highs.max()
     support = last_48_lows.min()
 
     resistance_touches = (last_48_highs >= resistance * (1 - TOUCH_TOLERANCE)).sum()
@@ -162,8 +162,7 @@ async def scan_once(bot):
                 save_signal(signal)
                 found += 1
 
-                # ─── Расчёт позиции и плеча ───────────────────
-                leverage = MAX_LEVERAGE  # из config.py = 50
+                leverage = MAX_LEVERAGE
                 position_pct = (RISK_PER_TRADE_PCT / risk_pct) * 100
                 margin_pct = position_pct / leverage
 
