@@ -9,7 +9,7 @@ from config import (
     BTC_EMA_PERIOD, ALT_EMA_PERIOD, VOLUME_SMA_PERIOD, ATR_PERIOD,
     LOOKBACK_BARS, MIN_TOUCHES, TOUCH_TOLERANCE,
     VOLUME_MULT_LONG, VOLUME_MULT_SHORT,
-    ATR_SL_MULTIPLIER, RR_RATIO,
+    ATR_SL_MULTIPLIER, RR_RATIO, MAX_LEVERAGE,
     MAX_OPEN_POSITIONS,
 )
 from database import save_signal, has_open_position, count_open_positions
@@ -42,7 +42,6 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int =
     if not rows:
         return None
 
-    # Bybit отдаёт в обратном порядке — разворачиваем
     rows = list(reversed(rows))
     df = pd.DataFrame(
         rows,
@@ -54,19 +53,13 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int =
 
 
 def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
-    """
-    Логика check_trading_signals_v2 из ТЗ.
-    Возвращает dict с параметрами сделки или None.
-    """
     if len(df_alt) < 850 or len(df_btc) < 60:
         return None
 
-    # 1. Трендовый фильтр BTC (M15)
     btc_close = df_btc["close"].iloc[-1]
     btc_ema50 = df_btc["close"].ewm(span=BTC_EMA_PERIOD).mean().iloc[-1]
     btc_is_bullish = btc_close > btc_ema50
 
-    # 2. Индикаторы альткоина
     close = df_alt["close"].iloc[-1]
     volume = df_alt["volume"].iloc[-1]
     vol_sma20 = df_alt["volume"].rolling(VOLUME_SMA_PERIOD).mean().iloc[-1]
@@ -76,7 +69,6 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
     if pd.isna(vol_sma20) or pd.isna(atr14) or pd.isna(ema200_h1):
         return None
 
-    # 3. Уровни за последние 48 свечей (12 часов)
     last_48_highs = df_alt["high"].iloc[-LOOKBACK_BARS - 1:-1]
     last_48_lows = df_alt["low"].iloc[-LOOKBACK_BARS - 1:-1]
 
@@ -89,7 +81,7 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
     resistance_touches = (last_48_highs >= resistance * (1 - TOUCH_TOLERANCE)).sum()
     support_touches = (last_48_lows <= support * (1 + TOUCH_TOLERANCE)).sum()
 
-    # 4. LONG
+    # LONG
     c_breakout_up = close > resistance
     c_vol_long = volume >= (VOLUME_MULT_LONG * vol_sma20)
 
@@ -109,7 +101,7 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
             "atr": float(atr14),
         }
 
-    # 5. SHORT
+    # SHORT
     c_breakout_down = close < support
     c_vol_short = volume >= (VOLUME_MULT_SHORT * vol_sma20)
 
@@ -133,7 +125,6 @@ def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
 
 
 async def scan_once(bot):
-    """Один цикл сканирования."""
     if not config.SCANNING_ENABLED:
         print("⏸ Сканирование остановлено")
         return
@@ -147,7 +138,6 @@ async def scan_once(bot):
     print(f"📊 Открытых позиций: {open_count}/{MAX_OPEN_POSITIONS}")
 
     async with aiohttp.ClientSession() as session:
-        # Загружаем BTC-свечи один раз
         df_btc = await fetch_klines(session, "BTCUSDT", limit=200)
         if df_btc is None or df_btc.empty:
             print("❌ Не удалось получить свечи BTC")
@@ -163,12 +153,10 @@ async def scan_once(bot):
             if not config.SCANNING_ENABLED:
                 return
 
-            # Проверка лимита
             if count_open_positions() >= MAX_OPEN_POSITIONS:
                 print(f"⛔ Достигнут лимит {MAX_OPEN_POSITIONS} позиций — стоп")
                 break
 
-            # Пропускаем монеты с открытой позицией
             if has_open_position(symbol):
                 continue
 
@@ -180,19 +168,28 @@ async def scan_once(bot):
             if signal:
                 save_signal(signal)
                 found += 1
-                print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f}")
 
-                # Отправка в Telegram
+                # Расчёт плеча
+                risk_pct = signal["risk_distance"] / signal["entry"] * 100
+                if risk_pct > 0:
+                    leverage = round(100 / risk_pct)
+                    if leverage > MAX_LEVERAGE:
+                        leverage = MAX_LEVERAGE
+                else:
+                    leverage = 1
+
+                print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f} | Плечо {leverage}x")
+
                 emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
-                rr = RR_RATIO
                 text = (
                     f"{emoji} <b>{signal['direction']} | {symbol}</b>\n\n"
                     f"Вход: <code>{signal['entry']:.6f}</code>\n"
                     f"Стоп: <code>{signal['stop']:.6f}</code>\n"
                     f"Тейк: <code>{signal['take']:.6f}</code>\n"
-                    f"R:R = <b>1:{rr}</b>\n"
+                    f"R:R = <b>1:{RR_RATIO}</b>\n"
                     f"ATR: <code>{signal['atr']:.6f}</code>\n"
-                    f"Риск: <b>{signal['risk_distance'] / signal['entry'] * 100:.2f}%</b>"
+                    f"Риск: <b>{risk_pct:.2f}%</b>\n"
+                    f"⚡ Плечо: <b>{leverage}x</b> (стоп = 100% маржи)"
                 )
                 if config.CHANNEL_ID:
                     try:
@@ -200,7 +197,7 @@ async def scan_once(bot):
                     except Exception as e:
                         print(f"Ошибка отправки: {e}")
 
-            await asyncio.sleep(0.3)  # мягкая пауза, чтобы не спамить Bybit
+            await asyncio.sleep(0.3)
 
         print(f"=== Найдено сигналов: {found} ===")
 
