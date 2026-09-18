@@ -1,255 +1,207 @@
 import asyncio
 import aiohttp
 import pandas as pd
-from bingx_py import BingXClient
+from datetime import datetime
 
+import config
 from config import (
-    BINGX_API_KEY, BINGX_SECRET_KEY,
-    MIN_VOLUME_USDT, MIN_RR, MAX_RR,
-    SCALP_ENABLED, SWING_ENABLED, LONGTERM_ENABLED,
+    COINS, BYBIT_KLINE_URL, BYBIT_CATEGORY, TIMEFRAME,
+    BTC_EMA_PERIOD, ALT_EMA_PERIOD, VOLUME_SMA_PERIOD, ATR_PERIOD,
+    LOOKBACK_BARS, MIN_TOUCHES, TOUCH_TOLERANCE,
+    VOLUME_MULT_LONG, VOLUME_MULT_SHORT,
+    ATR_SL_MULTIPLIER, RR_RATIO,
+    MAX_OPEN_POSITIONS,
 )
-from indicators import calculate_ema, calculate_rsi, calculate_macd
-from news_scanner import get_news_for_coin
-from ai_analyzer import analyze_setup
-from risk_calculator import calculate_tp_sl, is_rr_valid
+from database import save_signal, has_open_position, count_open_positions
+from stats_checker import check_open_signals
 
 
-MAX_SYMBOLS = 50
-
-
-async def get_all_futures_symbols() -> list[str]:
-    """Получить список фьючерсных пар BingX через библиотеку."""
+async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int = 1000):
+    """Получить свечи M15 с Bybit."""
+    params = {
+        "category": BYBIT_CATEGORY,
+        "symbol": symbol,
+        "interval": TIMEFRAME,
+        "limit": limit,
+    }
     try:
-        async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY) as client:
-            # Правильный вызов метода для фьючерсов
-            response = await client.swap.get_contracts()
-            symbols = []
-            for item in response.get("data", []):
-                symbol = item.get("symbol", "")
-                if symbol.endswith("-USDT") and item.get("status") == 1:
-                    symbols.append(symbol)
-            return symbols
+        async with session.get(BYBIT_KLINE_URL, params=params, timeout=15) as resp:
+            if resp.status != 200:
+                print(f"⚠️ {symbol}: HTTP {resp.status}")
+                return None
+            data = await resp.json()
     except Exception as e:
-        print(f"Ошибка получения списка пар: {e}")
-        return []
-
-
-async def get_klines(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
-    """Получить свечи через библиотеку BingX."""
-    try:
-        async with BingXClient(api_key=BINGX_API_KEY, api_secret=BINGX_SECRET_KEY) as client:
-            # Правильный вызов метода для свечей
-            response = await client.market.get_klines_v3(symbol, interval, limit)
-
-        if not isinstance(response, dict) or response.get("code") != 0:
-            return pd.DataFrame()
-
-        rows = response.get("data", [])
-        if not rows:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume", "close_time"])
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df.dropna()
-    except Exception as e:
-        print(f"Ошибка свечей {symbol} {interval}: {e}")
-        return pd.DataFrame()
-
-
-def check_scalp(df_5m, df_15m):
-    if len(df_5m) < 100 or len(df_15m) < 30:
-        return None
-    close = df_5m["close"].iloc[-1]
-    ema50 = calculate_ema(df_5m, 50).iloc[-1]
-    ema100 = calculate_ema(df_5m, 100).iloc[-1]
-    rsi = calculate_rsi(df_15m, 14).iloc[-1]
-    _, _, macd_hist = calculate_macd(df_15m)
-    macd_pos = macd_hist.iloc[-1] > 0
-
-    conditions = [close > ema50, close > ema100, rsi > 45, macd_pos]
-    met = sum(conditions)
-    if met < 2:
+        print(f"⚠️ {symbol}: {e}")
         return None
 
-    return {
-        "type": "scalp",
-        "type_label": "Скальп (до часа)",
-        "timeframe": "5м + 15м",
-        "price": close,
-        "rsi": round(rsi, 1),
-        "macd_positive": macd_pos,
-        "trend_up": close > ema100,
-        "met": met,
-        "total": 4,
-    }
-
-
-def check_swing(df_1h, df_4h):
-    if len(df_1h) < 200 or len(df_4h) < 30:
-        return None
-    close = df_1h["close"].iloc[-1]
-    ema200 = calculate_ema(df_1h, 200).iloc[-1]
-    rsi = calculate_rsi(df_4h, 14).iloc[-1]
-    _, _, macd_hist = calculate_macd(df_4h)
-    macd_pos = macd_hist.iloc[-1] > 0
-
-    conditions = [
-        close > ema200 * 0.97,
-        40 <= rsi <= 70,
-        macd_pos,
-        df_4h["close"].iloc[-1] > df_4h["close"].iloc[-2],
-    ]
-    met = sum(conditions)
-    if met < 2:
+    if data.get("retCode") != 0:
+        print(f"⚠️ {symbol}: retCode {data.get('retCode')}")
         return None
 
-    return {
-        "type": "swing",
-        "type_label": "Среднесрок (до 3 дней)",
-        "timeframe": "1ч + 4ч",
-        "price": close,
-        "rsi": round(rsi, 1),
-        "macd_positive": macd_pos,
-        "trend_up": close > ema200,
-        "met": met,
-        "total": 4,
-    }
-
-
-def check_longterm(df_1d):
-    if len(df_1d) < 200:
-        return None
-    close = df_1d["close"].iloc[-1]
-    ema200 = calculate_ema(df_1d, 200).iloc[-1]
-    rsi = calculate_rsi(df_1d, 14).iloc[-1]
-
-    conditions = [
-        close > ema200 * 0.95,
-        35 <= rsi <= 75,
-        df_1d["close"].iloc[-1] > df_1d["close"].iloc[-5],
-    ]
-    met = sum(conditions)
-    if met < 1:
+    rows = data.get("result", {}).get("list", [])
+    if not rows:
         return None
 
-    return {
-        "type": "longterm",
-        "type_label": "Долгосрок (от недели)",
-        "timeframe": "1D",
-        "price": close,
-        "rsi": round(rsi, 1),
-        "macd_positive": False,
-        "trend_up": close > ema200,
-        "met": met,
-        "total": 3,
-    }
+    # Bybit отдаёт в обратном порядке — разворачиваем
+    rows = list(reversed(rows))
+    df = pd.DataFrame(
+        rows,
+        columns=["time", "open", "high", "low", "close", "volume", "turnover"]
+    )
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna()
 
 
-async def scan_all() -> list[dict]:
-    signals = []
-    all_symbols = await get_all_futures_symbols()
-    symbols = all_symbols[:MAX_SYMBOLS]
-    print(f"=== Сканирую {len(symbols)} монет из {len(all_symbols)} ===")
+def check_signal(df_alt: pd.DataFrame, df_btc: pd.DataFrame, symbol: str):
+    """
+    Логика check_trading_signals_v2 из ТЗ.
+    Возвращает dict с параметрами сделки или None.
+    """
+    if len(df_alt) < 850 or len(df_btc) < 60:
+        return None
 
-    stats = {"no_klines": 0, "low_volume": 0, "no_signal": 0, "candidate": 0}
+    # 1. Трендовый фильтр BTC (M15)
+    btc_close = df_btc["close"].iloc[-1]
+    btc_ema50 = df_btc["close"].ewm(span=BTC_EMA_PERIOD).mean().iloc[-1]
+    btc_is_bullish = btc_close > btc_ema50
+
+    # 2. Индикаторы альткоина
+    close = df_alt["close"].iloc[-1]
+    volume = df_alt["volume"].iloc[-1]
+    vol_sma20 = df_alt["volume"].rolling(VOLUME_SMA_PERIOD).mean().iloc[-1]
+    atr14 = (df_alt["high"] - df_alt["low"]).rolling(ATR_PERIOD).mean().iloc[-1]
+    ema200_h1 = df_alt["close"].ewm(span=ALT_EMA_PERIOD).mean().iloc[-1]
+
+    if pd.isna(vol_sma20) or pd.isna(atr14) or pd.isna(ema200_h1):
+        return None
+
+    # 3. Уровни за последние 48 свечей (12 часов)
+    last_48_highs = df_alt["high"].iloc[-LOOKBACK_BARS - 1:-1]
+    last_48_lows = df_alt["low"].iloc[-LOOKBACK_BARS - 1:-1]
+
+    if len(last_48_highs) < LOOKBACK_BARS or len(last_48_lows) < LOOKBACK_BARS:
+        return None
+
+    resistance = last_48_highs.max()
+    support = last_48_lows.min()
+
+    resistance_touches = (last_48_highs >= resistance * (1 - TOUCH_TOLERANCE)).sum()
+    support_touches = (last_48_lows <= support * (1 + TOUCH_TOLERANCE)).sum()
+
+    # 4. LONG
+    c_breakout_up = close > resistance
+    c_vol_long = volume >= (VOLUME_MULT_LONG * vol_sma20)
+
+    if (btc_is_bullish and close > ema200_h1
+            and resistance_touches >= MIN_TOUCHES
+            and c_breakout_up and c_vol_long):
+        sl = close - (ATR_SL_MULTIPLIER * atr14)
+        risk_dist = close - sl
+        tp = close + (RR_RATIO * risk_dist)
+        return {
+            "symbol": symbol,
+            "direction": "LONG",
+            "entry": float(close),
+            "stop": float(sl),
+            "take": float(tp),
+            "risk_distance": float(risk_dist),
+            "atr": float(atr14),
+        }
+
+    # 5. SHORT
+    c_breakout_down = close < support
+    c_vol_short = volume >= (VOLUME_MULT_SHORT * vol_sma20)
+
+    if (not btc_is_bullish and close < ema200_h1
+            and support_touches >= MIN_TOUCHES
+            and c_breakout_down and c_vol_short):
+        sl = close + (ATR_SL_MULTIPLIER * atr14)
+        risk_dist = sl - close
+        tp = close - (RR_RATIO * risk_dist)
+        return {
+            "symbol": symbol,
+            "direction": "SHORT",
+            "entry": float(close),
+            "stop": float(sl),
+            "take": float(tp),
+            "risk_distance": float(risk_dist),
+            "atr": float(atr14),
+        }
+
+    return None
+
+
+async def scan_once(bot):
+    """Один цикл сканирования."""
+    if not config.SCANNING_ENABLED:
+        print("⏸ Сканирование остановлено")
+        return
+
+    open_count = count_open_positions()
+    if open_count >= MAX_OPEN_POSITIONS:
+        print(f"⛔ Уже открыто {open_count} позиций (макс {MAX_OPEN_POSITIONS}) — пропуск")
+        return
+
+    print(f"=== Сканирование: {datetime.utcnow().isoformat()} ===")
+    print(f"📊 Открытых позиций: {open_count}/{MAX_OPEN_POSITIONS}")
 
     async with aiohttp.ClientSession() as session:
-        for i, symbol in enumerate(symbols):
-            try:
-                df_5m = await get_klines(symbol, "5m", 100)
-                df_15m = await get_klines(symbol, "15m", 100)
-                df_1h = await get_klines(symbol, "1h", 250)
-                df_4h = await get_klines(symbol, "4h", 100)
-                df_1d = await get_klines(symbol, "1d", 250)
+        # Загружаем BTC-свечи один раз
+        df_btc = await fetch_klines(session, "BTCUSDT", limit=200)
+        if df_btc is None or df_btc.empty:
+            print("❌ Не удалось получить свечи BTC")
+            return
 
-                if df_5m.empty or df_1h.empty or df_1d.empty:
-                    print(f"[{i+1}/{len(symbols)}] {symbol}: нет свечей")
-                    stats["no_klines"] += 1
-                    continue
+        btc_close = df_btc["close"].iloc[-1]
+        btc_ema50 = df_btc["close"].ewm(span=BTC_EMA_PERIOD).mean().iloc[-1]
+        btc_is_bullish = btc_close > btc_ema50
+        print(f"₿ BTC: ${btc_close:.2f} | EMA50: ${btc_ema50:.2f} | Режим: {'BULL' if btc_is_bullish else 'BEAR'}")
 
-                volume_24h = df_1h["volume"].tail(24).sum() * df_1h["close"].iloc[-1]
-                if volume_24h < MIN_VOLUME_USDT:
-                    print(f"[{i+1}/{len(symbols)}] {symbol}: объём {volume_24h:.0f} < {MIN_VOLUME_USDT}")
-                    stats["low_volume"] += 1
-                    continue
+        found = 0
+        for symbol in COINS:
+            if not config.SCANNING_ENABLED:
+                return
 
-                candidates = []
-                if SCALP_ENABLED:
-                    c = check_scalp(df_5m, df_15m)
-                    if c:
-                        candidates.append(c)
-                if SWING_ENABLED:
-                    c = check_swing(df_1h, df_4h)
-                    if c:
-                        candidates.append(c)
-                if LONGTERM_ENABLED:
-                    c = check_longterm(df_1d)
-                    if c:
-                        candidates.append(c)
+            # Проверка лимита
+            if count_open_positions() >= MAX_OPEN_POSITIONS:
+                print(f"⛔ Достигнут лимит {MAX_OPEN_POSITIONS} позиций — стоп")
+                break
 
-                if not candidates:
-                    print(f"[{i+1}/{len(symbols)}] {symbol}: тех.сигналов нет")
-                    stats["no_signal"] += 1
-                    continue
-
-                print(f"[{i+1}/{len(symbols)}] {symbol}: КАНДИДАТ {[c['type'] for c in candidates]}")
-                stats["candidate"] += 1
-
-                news = await get_news_for_coin(session, symbol)
-
-                for cand in candidates:
-                    if cand["type"] == "scalp":
-                        df_for_atr = df_15m
-                    elif cand["type"] == "swing":
-                        df_for_atr = df_4h
-                    else:
-                        df_for_atr = df_1d
-
-                    levels = calculate_tp_sl(df_for_atr)
-                    if not levels:
-                        continue
-
-                    if not is_rr_valid(levels["rr"], MIN_RR, MAX_RR):
-                        continue
-
-                    ai_result = await analyze_setup(
-                        symbol=symbol,
-                        price=cand["price"],
-                        rsi=cand["rsi"],
-                        macd_positive=cand["macd_positive"],
-                        trend_up=cand["trend_up"],
-                        news_headlines=news,
-                        deal_type=cand["type_label"],
-                    )
-
-                    if ai_result.get("signal") != "long":
-                        continue
-
-                    signals.append({
-                        "symbol": symbol,
-                        "type": cand["type"],
-                        "type_label": cand["type_label"],
-                        "timeframe": cand["timeframe"],
-                        "price": cand["price"],
-                        "rsi": cand["rsi"],
-                        "entry": levels["entry"],
-                        "tp": levels["tp"],
-                        "sl": levels["sl"],
-                        "rr": levels["rr"],
-                        "confidence": ai_result.get("confidence", "low"),
-                        "reason": ai_result.get("reason", ""),
-                        "risk_note": ai_result.get("risk_note", ""),
-                    })
-
-                    await asyncio.sleep(1)
-
-            except Exception as e:
-                print(f"Ошибка {symbol}: {e}")
+            # Пропускаем монеты с открытой позицией
+            if has_open_position(symbol):
                 continue
 
-        print(f"=== ИТОГО: {stats} ===")
+            df_alt = await fetch_klines(session, symbol, limit=1000)
+            if df_alt is None or df_alt.empty:
+                continue
 
-    conf_order = {"high": 0, "medium": 1, "low": 2}
-    signals.sort(key=lambda s: conf_order.get(s["confidence"], 3))
-    return signals
+            signal = check_signal(df_alt, df_btc, symbol)
+            if signal:
+                save_signal(signal)
+                found += 1
+                print(f"✅ {signal['direction']} {symbol} | Entry ${signal['entry']:.4f} | SL ${signal['stop']:.4f} | TP ${signal['take']:.4f}")
+
+                # Отправка в Telegram
+                emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
+                rr = RR_RATIO
+                text = (
+                    f"{emoji} <b>{signal['direction']} | {symbol}</b>\n\n"
+                    f"Вход: <code>{signal['entry']:.6f}</code>\n"
+                    f"Стоп: <code>{signal['stop']:.6f}</code>\n"
+                    f"Тейк: <code>{signal['take']:.6f}</code>\n"
+                    f"R:R = <b>1:{rr}</b>\n"
+                    f"ATR: <code>{signal['atr']:.6f}</code>\n"
+                    f"Риск: <b>{signal['risk_distance'] / signal['entry'] * 100:.2f}%</b>"
+                )
+                if config.CHANNEL_ID:
+                    try:
+                        await bot.send_message(config.CHANNEL_ID, text, parse_mode="HTML")
+                    except Exception as e:
+                        print(f"Ошибка отправки: {e}")
+
+            await asyncio.sleep(0.3)  # мягкая пауза, чтобы не спамить Bybit
+
+        print(f"=== Найдено сигналов: {found} ===")
+
+    await check_open_signals()
