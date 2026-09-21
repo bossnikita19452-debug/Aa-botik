@@ -10,7 +10,6 @@ import aiohttp
 import numpy as np
 import pandas as pd
 
-# ─── Импортируем параметры из config.py ───────────────────────────
 from config import (
     COINS, BYBIT_KLINE_URL, BYBIT_CATEGORY, TIMEFRAME,
     EMA_FAST, EMA_MID, EMA_SLOW, EMA_TREND,
@@ -19,20 +18,20 @@ from config import (
     RR_CLIMAX, RR_L_LONG, RR_BULL_IMPULSE,
     MIN_RISK_PCT, MAX_RISK_PCT,
     SESSION_WEEKDAYS, SESSION_START_HOUR, SESSION_END_HOUR, MSK_OFFSET_HOURS,
-    MAX_HOLD_BARS,
+    MAX_HOLD_BARS, SESSION_24_7,
 )
 
 MSK = timezone(timedelta(hours=MSK_OFFSET_HOURS))
 
-# ─── Сколько дней тестировать и с каким плечом ───────────────────
-BACKTEST_DAYS = 30          # Можно поставить 7, 30, 90
-INITIAL_DEPOSIT = 1000      # USDT
-RISK_PER_TRADE_PCT = 1.0    # % депозита на сделку
-COMMISSION_PCT = 0.1        # % на вход и выход (Bybit taker ≈ 0.055)
+BACKTEST_DAYS = 30
+INITIAL_DEPOSIT = 1000
+RISK_PER_TRADE_PCT = 1.0
+COMMISSION_PCT = 0.1
 
 
 def in_session(dt_utc: datetime) -> bool:
-    """Пн–Пт 10:00–23:00 МСК."""
+    if SESSION_24_7:
+        return True
     msk = dt_utc.astimezone(MSK)
     if msk.weekday() not in SESSION_WEEKDAYS:
         return False
@@ -40,7 +39,6 @@ def in_session(dt_utc: datetime) -> bool:
 
 
 async def fetch_klines(session, symbol, interval="5", limit=1000):
-    """Получить свечи с Bybit."""
     params = {
         "category": BYBIT_CATEGORY,
         "symbol": symbol,
@@ -74,7 +72,6 @@ async def fetch_klines(session, symbol, interval="5", limit=1000):
 
 
 def add_indicators(df):
-    """Добавить все индикаторы."""
     df = df.copy()
     c = df["close"]
     df["ema9"] = c.ewm(span=EMA_FAST, adjust=False).mean()
@@ -94,7 +91,7 @@ def add_indicators(df):
 
     delta = c.diff()
     g5 = delta.where(delta > 0, 0).rolling(RSI_FAST).mean()
-    l5 = (-delta.where(delta < 0, 0)).rolling(RSI_FAST).mean()
+    l5 = (-delta.where(delta < 0, 0)).rolling(RSI_SLOW).mean()
     df["rsi5"] = 100 - (100 / (1 + g5 / l5.replace(0, np.nan)))
     g14 = delta.where(delta > 0, 0).rolling(RSI_SLOW).mean()
     l14 = (-delta.where(delta < 0, 0)).rolling(RSI_SLOW).mean()
@@ -128,6 +125,8 @@ def mod_climax(row):
     atr = float(row["atr14"])
     if atr <= 0 or np.isnan(atr):
         return None
+    if np.isnan(row["rsi14"]):
+        return None
 
     if row["rsi14"] <= 26 and row["lower_wick"] >= 0.58 * rng:
         entry = float(row["close"])
@@ -160,7 +159,7 @@ def mod_l_long(row):
         return None
     if row["volume"] < row["vol12"] * 1.15:
         return None
-    if not (30 <= row["rsi5"] <= 58):
+    if np.isnan(row["rsi5"]) or not (30 <= row["rsi5"] <= 58):
         return None
 
     atr = float(row["atr10"])
@@ -198,7 +197,7 @@ def mod_bull_impulse(row, btc_row, breadth):
         return None
     if row["volume"] < row["vol12"] * 1.05:
         return None
-    if row["rsi5"] > 80:
+    if not np.isnan(row["rsi5"]) and row["rsi5"] > 80:
         return None
     if not (row["close"] > row["open"] or row["close"] > row["ema9"]):
         return None
@@ -231,14 +230,11 @@ def check_signal(row, btc_row, breadth, bull):
 
 
 async def backtest():
-    print(f"=== БЭКТЕСТ: {BACKTEST_DAYS} дней, M5, {len(COINS)} монет ===")
-    print(f"📅 Старт: {datetime.utcnow().isoformat()}")
+    print(f"=== БЭКТЕСТ: {BACKTEST_DAYS} дней, M5, {len(COINS)} монет | 24/7={SESSION_24_7} ===")
 
     trades = []
 
     async with aiohttp.ClientSession() as session:
-        # Загружаем все монеты (по 1000 свечей ≈ 3.5 дня M5)
-        # Для 30 дней нужно качать несколько раз — упростим, качаем 1000
         data = {}
         for sym in COINS:
             df = await fetch_klines(session, sym, limit=1000)
@@ -252,17 +248,13 @@ async def backtest():
             print("❌ Нет данных BTC")
             return
 
-        # Берём данные BTC для контекста
         btc_df = data["BTCUSDT"]
-
-        # Проходим по всем барам (кроме первых 220 — там нет индикаторов)
         min_len = min(len(df) for df in data.values())
         start_idx = 220
 
         print(f"📊 Свечей: {min_len}, начало с бара {start_idx}")
 
         for i in range(start_idx, min_len):
-            # ─── Контекст: BTC и breadth ───────────────────────────
             btc_row = btc_df.iloc[i]
             breadth = sum(
                 1 for sym, df in data.items()
@@ -271,11 +263,9 @@ async def backtest():
 
             bull = is_bull_regime(btc_row)
 
-            # ─── Сигналы по всем монетам ───────────────────────────
             for sym, df in data.items():
                 row = df.iloc[i]
 
-                # Проверка сессии
                 try:
                     ts = int(df.iloc[i]["time"])
                     dt_utc = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
@@ -288,13 +278,11 @@ async def backtest():
                 if not signal:
                     continue
 
-                # ─── Симуляция сделки ──────────────────────────────
                 entry = signal["entry"]
                 sl = signal["stop"]
                 tp = signal["take"]
                 direction = signal["direction"]
 
-                # Идём вперёд до MAX_HOLD_BARS, ищем TP/SL
                 result = None
                 for j in range(i + 1, min(i + 1 + MAX_HOLD_BARS, min_len)):
                     future = df.iloc[j]
@@ -305,7 +293,7 @@ async def backtest():
                         if future["high"] >= tp:
                             result = "win"
                             break
-                    else:  # SHORT
+                    else:
                         if future["high"] >= sl:
                             result = "loss"
                             break
@@ -327,10 +315,6 @@ async def backtest():
                     "risk_distance": signal["risk_distance"],
                 })
 
-                # Пауза после сигнала (не открываем повторно на той же монете)
-                # В реальном боте это делается через has_open_position
-
-    # ─── ОТЧЁТ ────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("📊 ОТЧЁТ БЭКТЕСТА")
     print("=" * 60)
@@ -355,19 +339,17 @@ async def backtest():
     print(f"📈 Win Rate (закрытые): {wr_pure}%")
     print(f"📈 Win Rate (общий): {wr_total}%")
 
-    # PnL симуляция
     pnl = 0
     for t in trades:
         risk_pct = t["risk_distance"] / t["entry"] * 100
         if t["result"] == "win":
-            pnl += risk_pct * 1.2  # средний RR
+            pnl += risk_pct * 1.2
         elif t["result"] == "loss":
             pnl -= risk_pct
-        pnl -= COMMISSION_PCT * 2  # комиссия вход+выход
+        pnl -= COMMISSION_PCT * 2
 
     print(f"💰 PnL (сумма %): {pnl:.2f}%")
 
-    # По модулям
     print("\n📋 По модулям:")
     for mod_name in ["Climax", "L_Long", "Bull_Impulse"]:
         mod_trades = [t for t in trades if t["module"] == mod_name]
@@ -379,7 +361,6 @@ async def backtest():
         mwr = round(mw / mc * 100, 1) if mc > 0 else 0
         print(f"  {mod_name}: {len(mod_trades)} сделок, WR {mwr}%")
 
-    # По монетам (топ-5)
     print("\n📋 Топ монет по количеству сигналов:")
     from collections import Counter
     cnt = Counter(t["symbol"] for t in trades)
