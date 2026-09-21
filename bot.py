@@ -5,7 +5,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import config
-from config import TELEGRAM_BOT_TOKEN, ADMIN_IDS, CHANNEL_ID, SCAN_INTERVAL_MINUTES, CHECK_INTERVAL_SECONDS
+from config import (
+    TELEGRAM_BOT_TOKEN, ADMIN_IDS, CHANNEL_ID,
+    SCAN_INTERVAL_MINUTES, CHECK_INTERVAL_SECONDS, SESSION_24_7,
+)
 from database import (
     init_db, get_active_signals, get_recent_signals,
     get_stats, count_open_positions,
@@ -18,6 +21,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+def session_label() -> str:
+    if SESSION_24_7:
+        return "24/7 без ограничений"
+    return "Пн–Пт 10:00–23:00 МСК"
 
 
 def main_menu():
@@ -34,9 +43,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Quality Bot 5m</b>\n\n"
         "Модули: <b>Climax</b> → <b>L_Long</b> → <b>Bull_Impulse</b>\n"
         "Таймфрейм: <b>5m</b>\n"
-        "Сессия: <b>Пн–Пт 10:00–23:00 МСК</b>\n"
+        f"Сессия: <b>{session_label()}</b>\n"
         f"Сейчас: {session}\n\n"
-        "Цель: WR ~58%, ~9 сделок/день\n\n"
         "Выберите действие:",
         parse_mode="HTML",
         reply_markup=main_menu()
@@ -57,7 +65,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_map = {"win": "✅", "loss": "❌", "expired": "⏰", "active": "⏳"}
         text = "<b>Последние 10 сигналов:</b>\n\n"
         for s in signals:
-            # 0=id, 1=symbol, 2=direction, 3=entry, 4=stop, 5=take, ...
             emoji = status_map.get(s[9], "⚪")
             dir_emoji = "🟢" if s[2] == "LONG" else "🔴"
             text += f"{emoji} {dir_emoji} {s[1]} | Entry {s[3]:.4f}\n"
@@ -85,7 +92,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Winrate общий: {winrate}%</b>\n\n"
             f"🟢 LONG: {long_wr}% ({st['long_win']}/{long_closed})\n"
             f"🔴 SHORT: {short_wr}% ({st['short_win']}/{short_closed})\n\n"
-            f"Сессия: Пн–Пт 10:00–23:00 МСК\n"
+            f"Сессия: {session_label()}\n"
             f"Модули: Climax · L_Long · Bull_Impulse"
         )
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
@@ -106,7 +113,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("« Назад", callback_data="back_main")],
         ]
         await query.edit_message_text(
-            "⚙️ <b>Панель управления</b>",
+            f"⚙️ <b>Панель управления</b>\nСессия: {session_label()}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -129,7 +136,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("« Назад", callback_data="back_main")],
         ]
         await query.edit_message_text(
-            "⚙️ <b>Панель управления</b>",
+            f"⚙️ <b>Панель управления</b>\nСессия: {session_label()}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -168,16 +175,14 @@ async def main():
     set_bot(app.bot)
 
     scheduler = AsyncIOScheduler()
-    # Сканирование каждые 5 минут (закрытие 5m свечи)
     scheduler.add_job(scan_once, "interval", minutes=SCAN_INTERVAL_MINUTES, args=[app.bot])
-    # Проверка TP/SL
     scheduler.add_job(
         check_open_signals, "interval", seconds=CHECK_INTERVAL_SECONDS,
         kwargs={"chat_id": CHANNEL_ID}
     )
     scheduler.start()
 
-    logger.info("Quality Bot 5m запускается...")
+    logger.info("Quality Bot 5m запускается (SESSION_24_7=%s)...", SESSION_24_7)
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)

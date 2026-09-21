@@ -15,6 +15,7 @@ from config import (
     MIN_RISK_PCT, MAX_RISK_PCT,
     MAX_OPEN_POSITIONS, MAX_LEVERAGE, RISK_PER_TRADE_PCT,
     SESSION_WEEKDAYS, SESSION_START_HOUR, SESSION_END_HOUR, MSK_OFFSET_HOURS,
+    SESSION_24_7,
 )
 from database import save_signal, has_open_position, count_open_positions
 from stats_checker import check_open_signals
@@ -23,7 +24,12 @@ MSK = timezone(timedelta(hours=MSK_OFFSET_HOURS))
 
 
 def in_session(now_utc: datetime = None) -> bool:
+    """True если можно сканировать. При SESSION_24_7 — всегда True."""
+    if SESSION_24_7:
+        return True
     now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     msk = now.astimezone(MSK)
     if msk.weekday() not in SESSION_WEEKDAYS:
         return False
@@ -112,17 +118,33 @@ def _risk_ok(entry: float, sl: float) -> bool:
     return MIN_RISK_PCT <= rp <= MAX_RISK_PCT
 
 
+def _safe_float(x, default=None):
+    try:
+        v = float(x)
+        if np.isnan(v):
+            return default
+        return v
+    except (TypeError, ValueError):
+        return default
+
+
 def mod_climax(row) -> dict | None:
-    if row["volume"] < row["vol20"] * 2.8:
+    vol20 = _safe_float(row["vol20"])
+    if vol20 is None or vol20 <= 0:
         return None
-    rng = float(row["range"])
+    if row["volume"] < vol20 * 2.8:
+        return None
+    rng = _safe_float(row["range"], 0)
     if rng <= 0:
         return None
-    atr = float(row["atr14"])
-    if atr <= 0 or np.isnan(atr):
+    atr = _safe_float(row["atr14"])
+    if atr is None or atr <= 0:
+        return None
+    rsi14 = _safe_float(row["rsi14"])
+    if rsi14 is None:
         return None
 
-    if row["rsi14"] <= 26 and row["lower_wick"] >= 0.58 * rng:
+    if rsi14 <= 26 and row["lower_wick"] >= 0.58 * rng:
         entry = float(row["close"])
         sl = float(row["low"]) - 0.08 * atr
         if not _risk_ok(entry, sl):
@@ -134,7 +156,7 @@ def mod_climax(row) -> dict | None:
             "risk_distance": risk, "atr": atr, "module": "Climax",
         }
 
-    if row["rsi14"] >= 74 and row["upper_wick"] >= 0.58 * rng:
+    if rsi14 >= 74 and row["upper_wick"] >= 0.58 * rng:
         entry = float(row["close"])
         sl = float(row["high"]) + 0.08 * atr
         if not _risk_ok(entry, sl):
@@ -153,15 +175,20 @@ def mod_l_long(row) -> dict | None:
         return None
     if not (row["low"] <= row["ema9"] and row["close"] > row["ema9"]):
         return None
-    if not (row["close"] > row["open"] and row["lower_wick"] >= row["body"] * 0.50):
+    body = _safe_float(row["body"], 0)
+    if body <= 0:
         return None
-    if row["volume"] < row["vol12"] * 1.15:
+    if not (row["close"] > row["open"] and row["lower_wick"] >= body * 0.50):
         return None
-    if not (30 <= row["rsi5"] <= 58):
+    vol12 = _safe_float(row["vol12"])
+    if vol12 is None or vol12 <= 0 or row["volume"] < vol12 * 1.15:
+        return None
+    rsi5 = _safe_float(row["rsi5"])
+    if rsi5 is None or not (30 <= rsi5 <= 58):
         return None
 
-    atr = float(row["atr10"])
-    if atr <= 0 or np.isnan(atr):
+    atr = _safe_float(row["atr10"])
+    if atr is None or atr <= 0:
         return None
     entry = float(row["close"])
     sl = min(float(row["low"]), float(row["ema9"])) - 0.12 * atr
@@ -180,30 +207,32 @@ def is_bull_regime(btc_row) -> bool:
         return False
     if btc_row["close"] < btc_row["ema50"]:
         return False
-    r12 = float(btc_row["ret_12"]) if not np.isnan(btc_row["ret_12"]) else 0
+    r12 = _safe_float(btc_row["ret_12"], 0)
     return r12 > 0.004
 
 
 def mod_bull_impulse(row, btc_row, breadth: float) -> dict | None:
     if btc_row is None:
         return None
-    r3 = float(btc_row["ret_3"]) if not np.isnan(btc_row["ret_3"]) else 0
-    r6 = float(btc_row["ret_6"]) if not np.isnan(btc_row["ret_6"]) else 0
+    r3 = _safe_float(btc_row["ret_3"], 0)
+    r6 = _safe_float(btc_row["ret_6"], 0)
     if not (r3 >= 0.008 or r6 >= 0.015):
         return None
     if breadth < 0.50:
         return None
     if row["close"] < row["ema50"] * 0.988:
         return None
-    if row["volume"] < row["vol12"] * 1.05:
+    vol12 = _safe_float(row["vol12"])
+    if vol12 is None or vol12 <= 0 or row["volume"] < vol12 * 1.05:
         return None
-    if row["rsi5"] > 80:
+    rsi5 = _safe_float(row["rsi5"], 50)
+    if rsi5 > 80:
         return None
     if not (row["close"] > row["open"] or row["close"] > row["ema9"]):
         return None
 
-    atr = float(row["atr10"])
-    if atr <= 0 or np.isnan(atr):
+    atr = _safe_float(row["atr10"])
+    if atr is None or atr <= 0:
         return None
     entry = float(row["close"])
     sl = min(float(row["low"]), float(row["ema9"])) - 0.15 * atr
@@ -237,7 +266,7 @@ async def scan_once(bot):
         return
 
     if not in_session():
-        print("⏸ Вне сессии (Пн–Пт 10:00–23:00 МСК)")
+        print("⏸ Вне сессии")
         return
 
     open_count = count_open_positions()
@@ -245,7 +274,8 @@ async def scan_once(bot):
         print(f"⛔ Уже открыто {open_count}/{MAX_OPEN_POSITIONS} — пропуск")
         return
 
-    print(f"=== Сканирование 5m: {datetime.utcnow().isoformat()} ===")
+    now_str = datetime.now(timezone.utc).isoformat()
+    print(f"=== Сканирование 5m: {now_str} | 24/7={SESSION_24_7} ===")
     print(f"📊 Открытых позиций: {open_count}/{MAX_OPEN_POSITIONS}")
 
     async with aiohttp.ClientSession() as session:

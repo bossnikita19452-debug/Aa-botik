@@ -13,7 +13,8 @@ SCANNING_ENABLED = True
 
 # ─── Параметры стратегии ──────────────────────────────────────────
 TIMEFRAME = "5"                # Bybit ждёт "5", а не "5m"
-SCAN_INTERVAL_MINUTES = 1
+# Важно: интервал = ТФ свечи, иначе дубли на одной свече
+SCAN_INTERVAL_MINUTES = 5
 CHECK_INTERVAL_SECONDS = 30
 
 # ─── Индикаторы ───────────────────────────────────────────────────
@@ -44,10 +45,12 @@ MAX_LEVERAGE = 50
 MAX_OPEN_POSITIONS = 10
 MAX_HOLD_BARS = 9
 
-# ─── Сессия (Пн–Пт 10:00–23:00 МСК) ──────────────────────────────
-SESSION_WEEKDAYS = [0, 1, 2, 3, 4]   # 0=Пн, 4=Пт
-SESSION_START_HOUR = 10
-SESSION_END_HOUR = 23
+# ─── Сессия ───────────────────────────────────────────────────────
+# True = круглосуточно, без ограничений по дням/часам
+SESSION_24_7 = True
+SESSION_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]  # все дни (если SESSION_24_7=False)
+SESSION_START_HOUR = 0
+SESSION_END_HOUR = 24
 MSK_OFFSET_HOURS = 3
 
 # ─── Bybit ────────────────────────────────────────────────────────
