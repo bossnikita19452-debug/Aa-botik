@@ -1,115 +1,83 @@
-#!/usr/bin/env python3
 """
-Подробный бэктест стратегии Aa-botik (Climax / L_Long / Bull_Impulse)
-На 5-минутках Bybit за последние 30 дней.
+Автономный бэктест стратегии Climax + L_Long + Bull_Impulse.
+Не требует Telegram, БД, бота. Просто запусти: python backtest.py
 """
 
-import time
-import requests
+import asyncio
+from datetime import datetime, timezone, timedelta
+
+import aiohttp
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone, timedelta
-from collections import defaultdict
-from typing import Optional
 
-# ═══════════════════════════════════════════════════════════════
-# КОНФИГ (точно как в твоём config.py)
-# ═══════════════════════════════════════════════════════════════
-TIMEFRAME = "5"
-EMA_FAST, EMA_MID, EMA_SLOW, EMA_TREND = 9, 21, 50, 200
-VOL_SMA_FAST, VOL_SMA_SLOW = 12, 20
-ATR_FAST, ATR_SLOW = 10, 14
-RSI_FAST, RSI_SLOW = 5, 14
+# ─── Импортируем параметры из config.py ───────────────────────────
+from config import (
+    COINS, BYBIT_KLINE_URL, BYBIT_CATEGORY, TIMEFRAME,
+    EMA_FAST, EMA_MID, EMA_SLOW, EMA_TREND,
+    VOL_SMA_FAST, VOL_SMA_SLOW, ATR_FAST, ATR_SLOW,
+    RSI_FAST, RSI_SLOW,
+    RR_CLIMAX, RR_L_LONG, RR_BULL_IMPULSE,
+    MIN_RISK_PCT, MAX_RISK_PCT,
+    SESSION_WEEKDAYS, SESSION_START_HOUR, SESSION_END_HOUR, MSK_OFFSET_HOURS,
+    MAX_HOLD_BARS,
+)
 
-RR_CLIMAX = 1.35
-RR_L_LONG = 1.25
-RR_BULL_IMPULSE = 1.30
+MSK = timezone(timedelta(hours=MSK_OFFSET_HOURS))
 
-MIN_RISK_PCT = 0.20
-MAX_RISK_PCT = 2.00
-MAX_HOLD_BARS = 12          # 60 минут
-RISK_PER_TRADE_PCT = 1.0    # риск на сделку в % от депозита
-
-COINS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "LINKUSDT", "AVAXUSDT", "ADAUSDT", "LTCUSDT", "DOGEUSDT",
-    "DOTUSDT", "NEARUSDT",
-]
-
-BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
-BYBIT_CATEGORY = "linear"
-MSK = timezone(timedelta(hours=3))
+# ─── Сколько дней тестировать и с каким плечом ───────────────────
+BACKTEST_DAYS = 30          # Можно поставить 7, 30, 90
+INITIAL_DEPOSIT = 1000      # USDT
+RISK_PER_TRADE_PCT = 1.0    # % депозита на сделку
+COMMISSION_PCT = 0.1        # % на вход и выход (Bybit taker ≈ 0.055)
 
 
-# ═══════════════════════════════════════════════════════════════
-# ИНДИКАТОРЫ И МОДУЛИ (1-в-1 из scanner.py)
-# ═══════════════════════════════════════════════════════════════
-def in_session(dt: datetime) -> bool:
-    msk = dt.astimezone(MSK)
-    return msk.weekday() in (0, 1, 2, 3, 4) and 10 <= msk.hour < 23
+def in_session(dt_utc: datetime) -> bool:
+    """Пн–Пт 10:00–23:00 МСК."""
+    msk = dt_utc.astimezone(MSK)
+    if msk.weekday() not in SESSION_WEEKDAYS:
+        return False
+    return SESSION_START_HOUR <= msk.hour < SESSION_END_HOUR
 
 
-def fetch_klines(symbol: str, start_ms: int, end_ms: int) -> list:
-    all_rows = []
-    current_end = end_ms
-    while True:
-        params = {
-            "category": BYBIT_CATEGORY,
-            "symbol": symbol,
-            "interval": TIMEFRAME,
-            "end": current_end,
-            "limit": 1000,
-        }
-        try:
-            r = requests.get(BYBIT_KLINE_URL, params=params, timeout=30)
-            if r.status_code != 200:
-                print(f"  HTTP {r.status_code} {symbol}")
-                break
-            data = r.json()
-        except Exception as e:
-            print(f"  Error {symbol}: {e}")
-            break
-
-        if data.get("retCode") != 0:
-            print(f"  API {symbol}: {data.get('retMsg')}")
-            break
-
-        rows = data.get("result", {}).get("list", [])
-        if not rows:
-            break
-
-        for row in rows:
-            ts = int(row[0])
-            if ts < start_ms:
-                all_rows.extend([r for r in rows if int(r[0]) >= start_ms])
-                return list(reversed(all_rows))
-            all_rows.append(row)
-
-        oldest = int(rows[-1][0])
-        if oldest <= start_ms:
-            all_rows = [r for r in all_rows if int(r[0]) >= start_ms]
-            return list(reversed(all_rows))
-
-        current_end = oldest - 1
-        time.sleep(0.12)
-
-    return list(reversed(all_rows))
-
-
-def rows_to_df(rows) -> Optional[pd.DataFrame]:
-    if not rows:
+async def fetch_klines(session, symbol, interval="5", limit=1000):
+    """Получить свечи с Bybit."""
+    params = {
+        "category": BYBIT_CATEGORY,
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit,
+    }
+    try:
+        async with session.get(BYBIT_KLINE_URL, params=params, timeout=15) as resp:
+            if resp.status != 200:
+                print(f"⚠️ {symbol}: HTTP {resp.status}")
+                return None
+            data = await resp.json()
+    except Exception as e:
+        print(f"⚠️ {symbol}: {e}")
         return None
+
+    if data.get("retCode") != 0:
+        print(f"⚠️ {symbol}: {data.get('retMsg')}")
+        return None
+
+    rows = data.get("result", {}).get("list", [])
+    if not rows:
+        print(f"⚠️ {symbol}: пустой список")
+        return None
+
+    rows = list(reversed(rows))
     df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "turnover"])
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["time"] = pd.to_numeric(df["time"])
     return df.dropna().reset_index(drop=True)
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def add_indicators(df):
+    """Добавить все индикаторы."""
     df = df.copy()
     c = df["close"]
-    df["ema9"]  = c.ewm(span=EMA_FAST, adjust=False).mean()
+    df["ema9"] = c.ewm(span=EMA_FAST, adjust=False).mean()
     df["ema21"] = c.ewm(span=EMA_MID, adjust=False).mean()
     df["ema50"] = c.ewm(span=EMA_SLOW, adjust=False).mean()
     df["ema200"] = c.ewm(span=EMA_TREND, adjust=False).mean()
@@ -143,14 +111,15 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _risk_ok(entry: float, sl: float) -> bool:
+def _risk_ok(entry, sl):
     risk = abs(entry - sl)
     if risk <= 0:
         return False
-    return MIN_RISK_PCT <= (risk / entry * 100) <= MAX_RISK_PCT
+    rp = risk / entry * 100
+    return MIN_RISK_PCT <= rp <= MAX_RISK_PCT
 
 
-def mod_climax(row) -> Optional[dict]:
+def mod_climax(row):
     if row["volume"] < row["vol20"] * 2.8:
         return None
     rng = float(row["range"])
@@ -168,7 +137,7 @@ def mod_climax(row) -> Optional[dict]:
         risk = entry - sl
         return {"direction": "LONG", "entry": entry, "stop": sl,
                 "take": entry + RR_CLIMAX * risk, "risk_distance": risk,
-                "atr": atr, "module": "Climax", "rr": RR_CLIMAX}
+                "atr": atr, "module": "Climax"}
 
     if row["rsi14"] >= 74 and row["upper_wick"] >= 0.58 * rng:
         entry = float(row["close"])
@@ -178,11 +147,11 @@ def mod_climax(row) -> Optional[dict]:
         risk = sl - entry
         return {"direction": "SHORT", "entry": entry, "stop": sl,
                 "take": entry - RR_CLIMAX * risk, "risk_distance": risk,
-                "atr": atr, "module": "Climax", "rr": RR_CLIMAX}
+                "atr": atr, "module": "Climax"}
     return None
 
 
-def mod_l_long(row) -> Optional[dict]:
+def mod_l_long(row):
     if not (row["ema9"] > row["ema21"] and row["close"] > row["ema50"]):
         return None
     if not (row["low"] <= row["ema9"] and row["close"] > row["ema9"]):
@@ -204,17 +173,19 @@ def mod_l_long(row) -> Optional[dict]:
     risk = entry - sl
     return {"direction": "LONG", "entry": entry, "stop": sl,
             "take": entry + RR_L_LONG * risk, "risk_distance": risk,
-            "atr": atr, "module": "L_Long", "rr": RR_L_LONG}
+            "atr": atr, "module": "L_Long"}
 
 
-def is_bull_regime(btc_row) -> bool:
-    if btc_row is None or btc_row["close"] < btc_row["ema50"]:
+def is_bull_regime(btc_row):
+    if btc_row is None:
+        return False
+    if btc_row["close"] < btc_row["ema50"]:
         return False
     r12 = float(btc_row["ret_12"]) if not np.isnan(btc_row["ret_12"]) else 0
     return r12 > 0.004
 
 
-def mod_bull_impulse(row, btc_row, breadth: float) -> Optional[dict]:
+def mod_bull_impulse(row, btc_row, breadth):
     if btc_row is None:
         return None
     r3 = float(btc_row["ret_3"]) if not np.isnan(btc_row["ret_3"]) else 0
@@ -242,289 +213,181 @@ def mod_bull_impulse(row, btc_row, breadth: float) -> Optional[dict]:
     risk = entry - sl
     return {"direction": "LONG", "entry": entry, "stop": sl,
             "take": entry + RR_BULL_IMPULSE * risk, "risk_distance": risk,
-            "atr": atr, "module": "Bull_Impulse", "rr": RR_BULL_IMPULSE}
+            "atr": atr, "module": "Bull_Impulse"}
 
 
-def check_signal(row, btc_row, breadth: float, bull: bool) -> Optional[dict]:
-    for mod in (mod_climax, mod_l_long):
-        sig = mod(row)
+def check_signal(row, btc_row, breadth, bull):
+    sig = mod_climax(row)
+    if sig:
+        return sig
+    sig = mod_l_long(row)
+    if sig:
+        return sig
+    if bull:
+        sig = mod_bull_impulse(row, btc_row, breadth)
         if sig:
             return sig
-    if bull:
-        return mod_bull_impulse(row, btc_row, breadth)
     return None
 
 
-def simulate_trade(df: pd.DataFrame, entry_idx: int, signal: dict) -> tuple[str, float, int]:
-    """
-    Возвращает (outcome, r_multiple, bars_held)
-    r_multiple: +RR при тейке, -1 при стопе, 0 при таймауте
-    """
-    direction = signal["direction"]
-    stop = signal["stop"]
-    take = signal["take"]
-    rr = signal["rr"]
+async def backtest():
+    print(f"=== БЭКТЕСТ: {BACKTEST_DAYS} дней, M5, {len(COINS)} монет ===")
+    print(f"📅 Старт: {datetime.utcnow().isoformat()}")
 
-    end_idx = min(entry_idx + 1 + MAX_HOLD_BARS, len(df))
-    for i in range(entry_idx + 1, end_idx):
-        high = df.iloc[i]["high"]
-        low = df.iloc[i]["low"]
-        bars = i - entry_idx
+    trades = []
 
-        if direction == "LONG":
-            if low <= stop:
-                return "loss", -1.0, bars
-            if high >= take:
-                return "win", rr, bars
-        else:
-            if high >= stop:
-                return "loss", -1.0, bars
-            if low <= take:
-                return "win", rr, bars
-
-    # expired — закрываем по цене закрытия последней свечи
-    last_close = df.iloc[end_idx - 1]["close"]
-    entry = signal["entry"]
-    if direction == "LONG":
-        r = (last_close - entry) / signal["risk_distance"]
-    else:
-        r = (entry - last_close) / signal["risk_distance"]
-    return "expired", r, MAX_HOLD_BARS
-
-
-# ═══════════════════════════════════════════════════════════════
-# ОСНОВНОЙ БЭКТЕСТ
-# ═══════════════════════════════════════════════════════════════
-def run_backtest(days: int = 30):
-    now = datetime.now(timezone.utc)
-    end_ms = int(now.timestamp() * 1000)
-    start_ms = int((now - timedelta(days=days + 7)).timestamp() * 1000)
-
-    print("=" * 70)
-    print("БЭКТЕСТ СТРАТЕГИИ Aa-botik")
-    print(f"Период: {days} дней + прогрев индикаторов")
-    print(f"Монеты: {len(COINS)} | Таймфрейм: 5m | Сессия: Пн-Пт 10-23 МСК")
-    print("=" * 70)
-
-    # ── Загрузка данных ──
-    dfs = {}
-    for sym in COINS:
-        print(f"  {sym}...", end=" ", flush=True)
-        rows = fetch_klines(sym, start_ms, end_ms)
-        df = rows_to_df(rows)
-        if df is not None and len(df) > 250:
-            dfs[sym] = add_indicators(df)
-            print(f"{len(df)} баров")
-        else:
-            print("ОШИБКА")
-        time.sleep(0.15)
-
-    if "BTCUSDT" not in dfs:
-        print("\n❌ Нет данных BTC. Проверь интернет / API.")
-        return
-
-    print(f"\n✅ Загружено {len(dfs)} монет. Генерация сигналов...")
-
-    results = []
-    btc_df = dfs["BTCUSDT"]
-    start_i = 220
-
-    for i in range(start_i, len(btc_df) - MAX_HOLD_BARS - 2):
-        btc_row = btc_df.iloc[i]
-        ts = int(btc_row["time"])
-        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-
-        if not in_session(dt):
-            continue
-
-        # Breadth
-        green = total = 0
-        for sym, df in dfs.items():
-            idx = df["time"].searchsorted(ts)
-            if idx >= len(df):
-                idx = len(df) - 1
-            if abs(df.iloc[idx]["time"] - ts) > 300_000:
+    async with aiohttp.ClientSession() as session:
+        # Загружаем все монеты (по 1000 свечей ≈ 3.5 дня M5)
+        # Для 30 дней нужно качать несколько раз — упростим, качаем 1000
+        data = {}
+        for sym in COINS:
+            df = await fetch_klines(session, sym, limit=1000)
+            if df is None or len(df) < 220:
+                print(f"⚠️ {sym}: пропуск (мало данных)")
                 continue
-            total += 1
-            if df.iloc[idx]["ret_1"] > 0:
-                green += 1
-        breadth = green / total if total else 0
-        bull = is_bull_regime(btc_row)
+            data[sym] = add_indicators(df)
+            await asyncio.sleep(0.08)
 
-        for sym, df in dfs.items():
-            idx = df["time"].searchsorted(ts)
-            if idx >= len(df):
-                idx = len(df) - 1
-            if abs(df.iloc[idx]["time"] - ts) > 300_000:
-                continue
-            if idx < 220 or idx + MAX_HOLD_BARS + 2 >= len(df):
-                continue
-
-            row = df.iloc[idx]
-            sig = check_signal(row, btc_row, breadth, bull)
-            if not sig:
-                continue
-
-            outcome, r_mult, bars_held = simulate_trade(df, idx, sig)
-            risk_pct = sig["risk_distance"] / sig["entry"] * 100
-
-            results.append({
-                "time": dt,
-                "date": dt.date(),
-                "weekday": dt.strftime("%a"),
-                "hour_msk": dt.astimezone(MSK).hour,
-                "symbol": sym,
-                "direction": sig["direction"],
-                "module": sig["module"],
-                "entry": sig["entry"],
-                "stop": sig["stop"],
-                "take": sig["take"],
-                "rr": sig["rr"],
-                "risk_pct": risk_pct,
-                "outcome": outcome,
-                "r_multiple": r_mult,
-                "bars_held": bars_held,
-                "pnl_pct": r_mult * RISK_PER_TRADE_PCT,  # в % от депозита
-            })
-
-    if not results:
-        print("\n⚠️ За период не найдено ни одного сигнала.")
-        return
-
-    # ═══════════════════════════════════════════════════════════
-    # ОТЧЁТ
-    # ═══════════════════════════════════════════════════════════
-    df = pd.DataFrame(results)
-    now = datetime.now(timezone.utc)
-    week_ago = now - timedelta(days=7)
-    month_ago = now - timedelta(days=30)
-
-    def print_stats(sub: pd.DataFrame, title: str):
-        if sub.empty:
-            print(f"\n{'='*70}\n{title}\n{'='*70}")
-            print("Сделок: 0")
+        if "BTCUSDT" not in data:
+            print("❌ Нет данных BTC")
             return
 
-        total = len(sub)
-        wins = (sub["outcome"] == "win").sum()
-        losses = (sub["outcome"] == "loss").sum()
-        expired = (sub["outcome"] == "expired").sum()
-        decided = wins + losses
-        winrate = wins / decided * 100 if decided else 0
+        # Берём данные BTC для контекста
+        btc_df = data["BTCUSDT"]
 
-        avg_r = sub["r_multiple"].mean()
-        median_r = sub["r_multiple"].median()
-        sum_r = sub["r_multiple"].sum()
-        expectancy = avg_r  # средний R на сделку
+        # Проходим по всем барам (кроме первых 220 — там нет индикаторов)
+        min_len = min(len(df) for df in data.values())
+        start_idx = 220
 
-        gross_profit = sub.loc[sub["r_multiple"] > 0, "r_multiple"].sum()
-        gross_loss = abs(sub.loc[sub["r_multiple"] < 0, "r_multiple"].sum())
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        print(f"📊 Свечей: {min_len}, начало с бара {start_idx}")
 
-        # Симуляция эквити (риск 1% на сделку)
-        equity = [100.0]
-        for pnl in sub["pnl_pct"]:
-            equity.append(equity[-1] * (1 + pnl / 100))
-        equity = np.array(equity)
-        max_dd = 0
-        peak = equity[0]
-        for e in equity:
-            peak = max(peak, e)
-            dd = (peak - e) / peak * 100
-            max_dd = max(max_dd, dd)
-        final_equity = equity[-1]
-        total_return = final_equity - 100
+        for i in range(start_idx, min_len):
+            # ─── Контекст: BTC и breadth ───────────────────────────
+            btc_row = btc_df.iloc[i]
+            breadth = sum(
+                1 for sym, df in data.items()
+                if df.iloc[i]["ret_1"] > 0
+            ) / len(data)
 
-        print(f"\n{'='*70}")
-        print(f"{title}")
-        print(f"{'='*70}")
-        print(f"Всего сделок:          {total}")
-        print(f"  ✅ Win:              {wins:4}  ({wins/total*100:5.1f}%)")
-        print(f"  ❌ Loss:             {losses:4}  ({losses/total*100:5.1f}%)")
-        print(f"  ⏰ Expired:          {expired:4}  ({expired/total*100:5.1f}%)")
-        print(f"Винрейт (только W/L):  {winrate:.1f}%  ({wins}/{decided})")
-        print()
-        print(f"Средний R:             {avg_r:+.3f} R")
-        print(f"Медианный R:           {median_r:+.3f} R")
-        print(f"Суммарный R:           {sum_r:+.2f} R")
-        print(f"Expectancy:            {expectancy:+.3f} R на сделку")
-        print(f"Profit Factor:         {profit_factor:.2f}")
-        print()
-        print(f"Симуляция депозита (риск {RISK_PER_TRADE_PCT}% на сделку):")
-        print(f"  Старт:               100.00%")
-        print(f"  Финиш:               {final_equity:.2f}%")
-        print(f"  Доходность:          {total_return:+.2f}%")
-        print(f"  Макс. просадка:      {max_dd:.2f}%")
+            bull = is_bull_regime(btc_row)
 
-        # По модулям
-        print(f"\n{'─'*50}")
-        print("ПО МОДУЛЯМ:")
-        print(f"{'Модуль':<16} {'Всего':>6} {'Win':>5} {'Loss':>5} {'Exp':>5} {'WR%':>6} {'Avg R':>8} {'Sum R':>8}")
-        for mod in ["Climax", "L_Long", "Bull_Impulse"]:
-            m = sub[sub["module"] == mod]
-            if m.empty:
-                continue
-            w = (m["outcome"] == "win").sum()
-            l = (m["outcome"] == "loss").sum()
-            e = (m["outcome"] == "expired").sum()
-            wr = w / (w + l) * 100 if (w + l) else 0
-            print(f"{mod:<16} {len(m):6} {w:5} {l:5} {e:5} {wr:5.1f}% {m['r_multiple'].mean():+7.3f} {m['r_multiple'].sum():+7.2f}")
+            # ─── Сигналы по всем монетам ───────────────────────────
+            for sym, df in data.items():
+                row = df.iloc[i]
 
-        # По направлению
-        print(f"\n{'─'*50}")
-        print("ПО НАПРАВЛЕНИЮ:")
-        for d in ["LONG", "SHORT"]:
-            m = sub[sub["direction"] == d]
-            if m.empty:
-                continue
-            w = (m["outcome"] == "win").sum()
-            l = (m["outcome"] == "loss").sum()
-            wr = w / (w + l) * 100 if (w + l) else 0
-            print(f"  {d:<6}  total={len(m):3}  W={w:3}  L={l:3}  WR={wr:5.1f}%  AvgR={m['r_multiple'].mean():+.3f}")
+                # Проверка сессии
+                try:
+                    ts = int(df.iloc[i]["time"])
+                    dt_utc = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                except Exception:
+                    continue
+                if not in_session(dt_utc):
+                    continue
 
-        # По монетам (топ)
-        print(f"\n{'─'*50}")
-        print("ПО МОНЕТАМ (сортировка по Sum R):")
-        coin_stats = []
-        for sym in sub["symbol"].unique():
-            m = sub[sub["symbol"] == sym]
-            coin_stats.append((sym, len(m), m["r_multiple"].sum(), m["r_multiple"].mean()))
-        coin_stats.sort(key=lambda x: x[2], reverse=True)
-        print(f"{'Монета':<12} {'Сделок':>7} {'Sum R':>9} {'Avg R':>8}")
-        for sym, cnt, s_r, a_r in coin_stats:
-            print(f"{sym:<12} {cnt:7} {s_r:+9.2f} {a_r:+8.3f}")
+                signal = check_signal(row, btc_row, breadth, bull)
+                if not signal:
+                    continue
 
-        # По дням недели
-        print(f"\n{'─'*50}")
-        print("ПО ДНЯМ НЕДЕЛИ:")
-        for day in ["Mon", "Tue", "Wed", "Thu", "Fri"]:
-            m = sub[sub["weekday"] == day]
-            if m.empty:
-                continue
-            print(f"  {day}: {len(m):3} сделок | AvgR={m['r_multiple'].mean():+.3f} | SumR={m['r_multiple'].sum():+.2f}")
+                # ─── Симуляция сделки ──────────────────────────────
+                entry = signal["entry"]
+                sl = signal["stop"]
+                tp = signal["take"]
+                direction = signal["direction"]
 
-        # Среднее время удержания
-        print(f"\n{'─'*50}")
-        print(f"Среднее удержание:     {sub['bars_held'].mean():.1f} свечей ({sub['bars_held'].mean()*5:.0f} мин)")
-        print(f"Медиана удержания:     {sub['bars_held'].median():.0f} свечей")
+                # Идём вперёд до MAX_HOLD_BARS, ищем TP/SL
+                result = None
+                for j in range(i + 1, min(i + 1 + MAX_HOLD_BARS, min_len)):
+                    future = df.iloc[j]
+                    if direction == "LONG":
+                        if future["low"] <= sl:
+                            result = "loss"
+                            break
+                        if future["high"] >= tp:
+                            result = "win"
+                            break
+                    else:  # SHORT
+                        if future["high"] >= sl:
+                            result = "loss"
+                            break
+                        if future["low"] <= tp:
+                            result = "win"
+                            break
 
-    # ── Вывод ──
-    print_stats(df[df["time"] >= week_ago], "ПРОШЛАЯ НЕДЕЛЯ (7 дней)")
-    print_stats(df[df["time"] >= month_ago], "ПРОШЛЫЙ МЕСЯЦ (30 дней)")
+                if result is None:
+                    result = "expired"
 
-    # Последние 15 сигналов
-    print(f"\n{'='*70}")
-    print("ПОСЛЕДНИЕ 15 СИГНАЛОВ")
-    print(f"{'='*70}")
-    print(f"{'Дата/время UTC':<18} {'Монета':<11} {'Dir':<6} {'Модуль':<13} {'R':>6} {'Исход':<8} {'Бары'}")
-    for _, t in df.sort_values("time").tail(15).iterrows():
-        print(f"{t['time'].strftime('%Y-%m-%d %H:%M'):<18} {t['symbol']:<11} {t['direction']:<6} "
-              f"{t['module']:<13} {t['r_multiple']:+5.2f} {t['outcome']:<8} {t['bars_held']}")
+                trades.append({
+                    "symbol": sym,
+                    "module": signal["module"],
+                    "direction": direction,
+                    "entry": entry,
+                    "sl": sl,
+                    "tp": tp,
+                    "result": result,
+                    "risk_distance": signal["risk_distance"],
+                })
 
-    print(f"\n{'='*70}")
-    print("Готово.")
-    print("=" * 70)
+                # Пауза после сигнала (не открываем повторно на той же монете)
+                # В реальном боте это делается через has_open_position
+
+    # ─── ОТЧЁТ ────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("📊 ОТЧЁТ БЭКТЕСТА")
+    print("=" * 60)
+
+    total = len(trades)
+    if total == 0:
+        print("❌ Ни одной сделки. Фильтры слишком строгие.")
+        return
+
+    wins = sum(1 for t in trades if t["result"] == "win")
+    losses = sum(1 for t in trades if t["result"] == "loss")
+    expired = sum(1 for t in trades if t["result"] == "expired")
+
+    closed = wins + losses
+    wr_pure = round(wins / closed * 100, 1) if closed > 0 else 0
+    wr_total = round(wins / total * 100, 1)
+
+    print(f"Всего сделок: {total}")
+    print(f"✅ WIN: {wins}")
+    print(f"❌ LOSS: {losses}")
+    print(f"⏰ EXPIRED: {expired}")
+    print(f"📈 Win Rate (закрытые): {wr_pure}%")
+    print(f"📈 Win Rate (общий): {wr_total}%")
+
+    # PnL симуляция
+    pnl = 0
+    for t in trades:
+        risk_pct = t["risk_distance"] / t["entry"] * 100
+        if t["result"] == "win":
+            pnl += risk_pct * 1.2  # средний RR
+        elif t["result"] == "loss":
+            pnl -= risk_pct
+        pnl -= COMMISSION_PCT * 2  # комиссия вход+выход
+
+    print(f"💰 PnL (сумма %): {pnl:.2f}%")
+
+    # По модулям
+    print("\n📋 По модулям:")
+    for mod_name in ["Climax", "L_Long", "Bull_Impulse"]:
+        mod_trades = [t for t in trades if t["module"] == mod_name]
+        if not mod_trades:
+            continue
+        mw = sum(1 for t in mod_trades if t["result"] == "win")
+        ml = sum(1 for t in mod_trades if t["result"] == "loss")
+        mc = mw + ml
+        mwr = round(mw / mc * 100, 1) if mc > 0 else 0
+        print(f"  {mod_name}: {len(mod_trades)} сделок, WR {mwr}%")
+
+    # По монетам (топ-5)
+    print("\n📋 Топ монет по количеству сигналов:")
+    from collections import Counter
+    cnt = Counter(t["symbol"] for t in trades)
+    for sym, c in cnt.most_common(5):
+        print(f"  {sym}: {c} сигналов")
+
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    run_backtest(days=30)
+    asyncio.run(backtest())
