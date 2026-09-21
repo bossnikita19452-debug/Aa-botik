@@ -23,7 +23,6 @@ MSK = timezone(timedelta(hours=MSK_OFFSET_HOURS))
 
 
 def in_session(now_utc: datetime = None) -> bool:
-    """Пн–Пт 10:00–23:00 МСК"""
     now = now_utc or datetime.now(timezone.utc)
     msk = now.astimezone(MSK)
     if msk.weekday() not in SESSION_WEEKDAYS:
@@ -41,6 +40,7 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int =
     try:
         async with session.get(BYBIT_KLINE_URL, params=params, timeout=15) as resp:
             if resp.status != 200:
+                print(f"⚠️ {symbol}: HTTP {resp.status}")
                 return None
             data = await resp.json()
     except Exception as e:
@@ -48,10 +48,12 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int =
         return None
 
     if data.get("retCode") != 0:
+        print(f"⚠️ {symbol}: retCode {data.get('retCode')} — {data.get('retMsg')}")
         return None
 
     rows = data.get("result", {}).get("list", [])
     if not rows:
+        print(f"⚠️ {symbol}: пустой список свечей")
         return None
 
     rows = list(reversed(rows))
@@ -61,7 +63,8 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int =
     )
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna()
+    df = df.dropna()
+    return df
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -110,7 +113,6 @@ def _risk_ok(entry: float, sl: float) -> bool:
 
 
 def mod_climax(row) -> dict | None:
-    """Volume climax rejection"""
     if row["volume"] < row["vol20"] * 2.8:
         return None
     rng = float(row["range"])
@@ -120,7 +122,6 @@ def mod_climax(row) -> dict | None:
     if atr <= 0 or np.isnan(atr):
         return None
 
-    # LONG after panic
     if row["rsi14"] <= 26 and row["lower_wick"] >= 0.58 * rng:
         entry = float(row["close"])
         sl = float(row["low"]) - 0.08 * atr
@@ -133,7 +134,6 @@ def mod_climax(row) -> dict | None:
             "risk_distance": risk, "atr": atr, "module": "Climax",
         }
 
-    # SHORT after euphoria
     if row["rsi14"] >= 74 and row["upper_wick"] >= 0.58 * rng:
         entry = float(row["close"])
         sl = float(row["high"]) + 0.08 * atr
@@ -149,7 +149,6 @@ def mod_climax(row) -> dict | None:
 
 
 def mod_l_long(row) -> dict | None:
-    """Tight long pullback"""
     if not (row["ema9"] > row["ema21"] and row["close"] > row["ema50"]):
         return None
     if not (row["low"] <= row["ema9"] and row["close"] > row["ema9"]):
@@ -186,7 +185,6 @@ def is_bull_regime(btc_row) -> bool:
 
 
 def mod_bull_impulse(row, btc_row, breadth: float) -> dict | None:
-    """Market-wide impulse long (only in bull regime)"""
     if btc_row is None:
         return None
     r3 = float(btc_row["ret_3"]) if not np.isnan(btc_row["ret_3"]) else 0
@@ -220,7 +218,6 @@ def mod_bull_impulse(row, btc_row, breadth: float) -> dict | None:
 
 
 def check_signal(row, btc_row, breadth: float, bull: bool) -> dict | None:
-    """Priority: Climax → L_Long → Bull_Impulse"""
     sig = mod_climax(row)
     if sig:
         return sig
@@ -252,23 +249,23 @@ async def scan_once(bot):
     print(f"📊 Открытых позиций: {open_count}/{MAX_OPEN_POSITIONS}")
 
     async with aiohttp.ClientSession() as session:
-        # BTC + all coins
         dfs = {}
         for sym in COINS:
             df = await fetch_klines(session, sym, limit=300)
             if df is not None and len(df) >= 220:
                 dfs[sym] = add_indicators(df)
+            else:
+                print(f"⚠️ {sym}: мало данных ({len(df) if df is not None else 0} свечей)")
             await asyncio.sleep(0.08)
 
         if "BTCUSDT" not in dfs:
-            print("❌ Нет данных BTC")
+            print("❌ Нет данных BTC — проверь логи выше")
             return
 
         btc = dfs["BTCUSDT"]
         btc_row = btc.iloc[-1]
         bull = is_bull_regime(btc_row)
 
-        # Breadth: доля зелёных на последней свече
         green = sum(1 for d in dfs.values() if d.iloc[-1]["ret_1"] > 0)
         breadth = green / len(dfs) if dfs else 0
 
