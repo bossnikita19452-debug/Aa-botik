@@ -14,7 +14,7 @@ SCANNING_ENABLED = True
 # ─── Параметры стратегии ──────────────────────────────────────────
 TIMEFRAME = "5"                # Bybit ждёт "5", а не "5m"
 SCAN_INTERVAL_MINUTES = 5
-CHECK_INTERVAL_SECONDS = 60    # tickers реже — меньше rate limit
+CHECK_INTERVAL_SECONDS = 60
 
 # ─── Индикаторы ───────────────────────────────────────────────────
 EMA_FAST = 9
@@ -54,24 +54,23 @@ MSK_OFFSET_HOURS = 3
 # ─── Bybit / rate limit ───────────────────────────────────────────
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 BYBIT_CATEGORY = "linear"
-# ~26 монет × 0.55 ≈ 14 сек на цикл
 API_SLEEP_SEC = 0.55
 API_MAX_RETRIES = 4
 KLINE_LIMIT = 250
 
 # ─── Монеты ───────────────────────────────────────────────────────
-# Базовый список + месяц-тест WR >= 55%
-# WR55: BRETT 66.7%, GRT 63.9%, CNPY 71.4%(n=9), YGG 58.6%,
-#        SHIB 57.7%, SEI 56.8%, PROVE 55.6%
+# WR>=55% month-test: BRETT, GRT, YGG, SHIB(1000), SEI, PROVE
+# CNPY убран — нет на Bybit linear
+# SHIB на Bybit = 1000SHIBUSDT (не SHIBUSDT)
 COINS = [
     # core
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "SUIUSDT",
     "APTUSDT", "ARBUSDT", "OPUSDT", "ATOMUSDT", "DOTUSDT",
     "LTCUSDT", "AAVEUSDT", "TRXUSDT", "ICPUSDT",
-    # month-test Pure WR >= 55%
-    "BRETTUSDT", "GRTUSDT", "YGGUSDT", "SHIBUSDT",
-    "SEIUSDT", "PROVEUSDT", "CNPYUSDT",
+    # month-test Pure WR >= 55% (Bybit symbols)
+    "BRETTUSDT", "GRTUSDT", "YGGUSDT", "1000SHIBUSDT",
+    "SEIUSDT", "PROVEUSDT",
 ]
 
 SIGNAL_EMOJI = {
