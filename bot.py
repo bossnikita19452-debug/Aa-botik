@@ -5,12 +5,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import config
-from config import TELEGRAM_BOT_TOKEN, ADMIN_IDS, CHANNEL_ID
+from config import TELEGRAM_BOT_TOKEN, ADMIN_IDS, CHANNEL_ID, SCAN_INTERVAL_MINUTES, CHECK_INTERVAL_SECONDS
 from database import (
     init_db, get_active_signals, get_recent_signals,
     get_stats, count_open_positions,
 )
-from scanner import scan_once
+from scanner import scan_once, in_session
 from stats_checker import check_open_signals, set_bot
 
 logging.basicConfig(
@@ -29,10 +29,14 @@ def main_menu():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = "✅ в сессии" if in_session() else "⏸ вне сессии"
     await update.message.reply_text(
-        "🤖 <b>Breakout + Volume Bot</b>\n\n"
-        "Стратегия: пробой консолидаций на повышенном объёме.\n"
-        "Таймфрейм: M15. Направления: LONG + SHORT.\n\n"
+        "🤖 <b>Quality Bot 5m</b>\n\n"
+        "Модули: <b>Climax</b> → <b>L_Long</b> → <b>Bull_Impulse</b>\n"
+        "Таймфрейм: <b>5m</b>\n"
+        "Сессия: <b>Пн–Пт 10:00–23:00 МСК</b>\n"
+        f"Сейчас: {session}\n\n"
+        "Цель: WR ~58%, ~9 сделок/день\n\n"
         "Выберите действие:",
         parse_mode="HTML",
         reply_markup=main_menu()
@@ -48,12 +52,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "last_signals":
         signals = get_recent_signals(10)
         if not signals:
-            await query.edit_message_text("Пока нет сигналов.")
+            await query.edit_message_text("Пока нет сигналов.", reply_markup=main_menu())
             return
         status_map = {"win": "✅", "loss": "❌", "expired": "⏰", "active": "⏳"}
         text = "<b>Последние 10 сигналов:</b>\n\n"
         for s in signals:
-            # 0=id, 1=symbol, 2=direction, 3=entry, 4=stop, 5=take, 6=risk_distance, ...
+            # 0=id, 1=symbol, 2=direction, 3=entry, 4=stop, 5=take, ...
             emoji = status_map.get(s[9], "⚪")
             dir_emoji = "🟢" if s[2] == "LONG" else "🔴"
             text += f"{emoji} {dir_emoji} {s[1]} | Entry {s[3]:.4f}\n"
@@ -72,7 +76,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         open_now = count_open_positions()
 
         text = (
-            f"📈 <b>Статистика</b>\n\n"
+            f"📈 <b>Статистика Quality 5m</b>\n\n"
             f"Всего сигналов: <b>{st['total']}</b>\n"
             f"✅ TP: <b>{st['win']}</b>\n"
             f"❌ SL: <b>{st['loss']}</b>\n"
@@ -80,7 +84,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ Открыто сейчас: <b>{open_now}</b>\n\n"
             f"<b>Winrate общий: {winrate}%</b>\n\n"
             f"🟢 LONG: {long_wr}% ({st['long_win']}/{long_closed})\n"
-            f"🔴 SHORT: {short_wr}% ({st['short_win']}/{short_closed})"
+            f"🔴 SHORT: {short_wr}% ({st['short_win']}/{short_closed})\n\n"
+            f"Сессия: Пн–Пт 10:00–23:00 МСК\n"
+            f"Модули: Climax · L_Long · Bull_Impulse"
         )
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
 
@@ -90,8 +96,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         status = "▶️ Активно" if config.SCANNING_ENABLED else "⏸ Остановлено"
         toggle_text = "⏸ Остановить сканер" if config.SCANNING_ENABLED else "▶️ Возобновить сканер"
+        sess = "✅ в сессии" if in_session() else "⏸ вне сессии"
         keyboard = [
             [InlineKeyboardButton(f"Сканер: {status}", callback_data="noop")],
+            [InlineKeyboardButton(f"Сессия: {sess}", callback_data="noop")],
             [InlineKeyboardButton(toggle_text, callback_data="toggle_scan")],
             [InlineKeyboardButton("🔄 Сканировать сейчас", callback_data="force_scan")],
             [InlineKeyboardButton("🔍 Проверить позиции", callback_data="check_trades")],
@@ -111,8 +119,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"Сканирование {status}")
         status_label = "▶️ Активно" if config.SCANNING_ENABLED else "⏸ Остановлено"
         toggle_text = "⏸ Остановить сканер" if config.SCANNING_ENABLED else "▶️ Возобновить сканер"
+        sess = "✅ в сессии" if in_session() else "⏸ вне сессии"
         keyboard = [
             [InlineKeyboardButton(f"Сканер: {status_label}", callback_data="noop")],
+            [InlineKeyboardButton(f"Сессия: {sess}", callback_data="noop")],
             [InlineKeyboardButton(toggle_text, callback_data="toggle_scan")],
             [InlineKeyboardButton("🔄 Сканировать сейчас", callback_data="force_scan")],
             [InlineKeyboardButton("🔍 Проверить позиции", callback_data="check_trades")],
@@ -158,16 +168,16 @@ async def main():
     set_bot(app.bot)
 
     scheduler = AsyncIOScheduler()
-    # Сканирование раз в 15 минут (на закрытии свечи M15)
-    scheduler.add_job(scan_once, "interval", minutes=15, args=[app.bot])
-    # Проверка TP/SL каждые 30 секунд
+    # Сканирование каждые 5 минут (закрытие 5m свечи)
+    scheduler.add_job(scan_once, "interval", minutes=SCAN_INTERVAL_MINUTES, args=[app.bot])
+    # Проверка TP/SL
     scheduler.add_job(
-        check_open_signals, "interval", seconds=30,
+        check_open_signals, "interval", seconds=CHECK_INTERVAL_SECONDS,
         kwargs={"chat_id": CHANNEL_ID}
     )
     scheduler.start()
 
-    logger.info("Бот запускается...")
+    logger.info("Quality Bot 5m запускается...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
