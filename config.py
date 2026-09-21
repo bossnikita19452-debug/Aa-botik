@@ -14,7 +14,7 @@ SCANNING_ENABLED = True
 # ─── Параметры стратегии ──────────────────────────────────────────
 TIMEFRAME = "5"                # Bybit ждёт "5", а не "5m"
 SCAN_INTERVAL_MINUTES = 5
-CHECK_INTERVAL_SECONDS = 45    # реже дергать tickers (rate limit)
+CHECK_INTERVAL_SECONDS = 60    # tickers реже — меньше rate limit
 
 # ─── Индикаторы ───────────────────────────────────────────────────
 EMA_FAST = 9
@@ -54,12 +54,12 @@ MSK_OFFSET_HOURS = 3
 # ─── Bybit / rate limit ───────────────────────────────────────────
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 BYBIT_CATEGORY = "linear"
-# Пауза между запросами kline (сек). 20 монет × 0.35 ≈ 7 сек на цикл — безопасно
-API_SLEEP_SEC = 0.35
-API_MAX_RETRIES = 3
-KLINE_LIMIT = 250   # хватает для EMA200 + запас, меньше трафика
+# Пауза между kline: 19 монет × 0.5 ≈ 9.5 сек на цикл
+API_SLEEP_SEC = 0.5
+API_MAX_RETRIES = 4
+KLINE_LIMIT = 250
 
-# ─── Монеты (без TON — часто пустой list на linear) ───────────────
+# ─── Монеты ───────────────────────────────────────────────────────
 COINS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "SUIUSDT",
