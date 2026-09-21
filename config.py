@@ -54,17 +54,24 @@ MSK_OFFSET_HOURS = 3
 # ─── Bybit / rate limit ───────────────────────────────────────────
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 BYBIT_CATEGORY = "linear"
-# Пауза между kline: 19 монет × 0.5 ≈ 9.5 сек на цикл
-API_SLEEP_SEC = 0.5
+# ~26 монет × 0.55 ≈ 14 сек на цикл
+API_SLEEP_SEC = 0.55
 API_MAX_RETRIES = 4
 KLINE_LIMIT = 250
 
 # ─── Монеты ───────────────────────────────────────────────────────
+# Базовый список + месяц-тест WR >= 55%
+# WR55: BRETT 66.7%, GRT 63.9%, CNPY 71.4%(n=9), YGG 58.6%,
+#        SHIB 57.7%, SEI 56.8%, PROVE 55.6%
 COINS = [
+    # core
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "SUIUSDT",
     "APTUSDT", "ARBUSDT", "OPUSDT", "ATOMUSDT", "DOTUSDT",
     "LTCUSDT", "AAVEUSDT", "TRXUSDT", "ICPUSDT",
+    # month-test Pure WR >= 55%
+    "BRETTUSDT", "GRTUSDT", "YGGUSDT", "SHIBUSDT",
+    "SEIUSDT", "PROVEUSDT", "CNPYUSDT",
 ]
 
 SIGNAL_EMOJI = {
