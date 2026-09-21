@@ -13,9 +13,8 @@ SCANNING_ENABLED = True
 
 # ─── Параметры стратегии ──────────────────────────────────────────
 TIMEFRAME = "5"                # Bybit ждёт "5", а не "5m"
-# Важно: интервал = ТФ свечи, иначе дубли на одной свече
 SCAN_INTERVAL_MINUTES = 5
-CHECK_INTERVAL_SECONDS = 30
+CHECK_INTERVAL_SECONDS = 45    # реже дергать tickers (rate limit)
 
 # ─── Индикаторы ───────────────────────────────────────────────────
 EMA_FAST = 9
@@ -46,26 +45,28 @@ MAX_OPEN_POSITIONS = 10
 MAX_HOLD_BARS = 9
 
 # ─── Сессия ───────────────────────────────────────────────────────
-# True = круглосуточно, без ограничений по дням/часам
 SESSION_24_7 = True
-SESSION_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]  # все дни (если SESSION_24_7=False)
+SESSION_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]
 SESSION_START_HOUR = 0
 SESSION_END_HOUR = 24
 MSK_OFFSET_HOURS = 3
 
-# ─── Bybit ────────────────────────────────────────────────────────
+# ─── Bybit / rate limit ───────────────────────────────────────────
 BYBIT_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 BYBIT_CATEGORY = "linear"
+# Пауза между запросами kline (сек). 20 монет × 0.35 ≈ 7 сек на цикл — безопасно
+API_SLEEP_SEC = 0.35
+API_MAX_RETRIES = 3
+KLINE_LIMIT = 250   # хватает для EMA200 + запас, меньше трафика
 
-# ─── Монеты ──────────────────────────────────────────────────────
+# ─── Монеты (без TON — часто пустой list на linear) ───────────────
 COINS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "SUIUSDT",
     "APTUSDT", "ARBUSDT", "OPUSDT", "ATOMUSDT", "DOTUSDT",
-    "LTCUSDT", "AAVEUSDT", "TRXUSDT", "ICPUSDT", "TONUSDT",
+    "LTCUSDT", "AAVEUSDT", "TRXUSDT", "ICPUSDT",
 ]
 
-# ─── Эмодзи для модулей ──────────────────────────────────────────
 SIGNAL_EMOJI = {
     "Climax": "⚡",
     "L_Long": "🟢",

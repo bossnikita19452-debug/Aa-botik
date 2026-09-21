@@ -15,7 +15,7 @@ from config import (
     MIN_RISK_PCT, MAX_RISK_PCT,
     MAX_OPEN_POSITIONS, MAX_LEVERAGE, RISK_PER_TRADE_PCT,
     SESSION_WEEKDAYS, SESSION_START_HOUR, SESSION_END_HOUR, MSK_OFFSET_HOURS,
-    SESSION_24_7,
+    SESSION_24_7, API_SLEEP_SEC, API_MAX_RETRIES, KLINE_LIMIT,
 )
 from database import save_signal, has_open_position, count_open_positions
 from stats_checker import check_open_signals
@@ -24,7 +24,6 @@ MSK = timezone(timedelta(hours=MSK_OFFSET_HOURS))
 
 
 def in_session(now_utc: datetime = None) -> bool:
-    """True если можно сканировать. При SESSION_24_7 — всегда True."""
     if SESSION_24_7:
         return True
     now = now_utc or datetime.now(timezone.utc)
@@ -36,41 +35,64 @@ def in_session(now_utc: datetime = None) -> bool:
     return SESSION_START_HOUR <= msk.hour < SESSION_END_HOUR
 
 
-async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int = 300):
+async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int = None):
+    """Klines с ретраями при rate limit (retCode 10006)."""
+    if limit is None:
+        limit = KLINE_LIMIT
     params = {
         "category": BYBIT_CATEGORY,
         "symbol": symbol,
         "interval": TIMEFRAME,
         "limit": limit,
     }
-    try:
-        async with session.get(BYBIT_KLINE_URL, params=params, timeout=15) as resp:
-            if resp.status != 200:
-                print(f"⚠️ {symbol}: HTTP {resp.status}")
+
+    for attempt in range(1, API_MAX_RETRIES + 1):
+        try:
+            async with session.get(BYBIT_KLINE_URL, params=params, timeout=20) as resp:
+                if resp.status == 429:
+                    wait = 1.5 * attempt
+                    print(f"⚠️ {symbol}: HTTP 429, жду {wait:.1f}s (попытка {attempt}/{API_MAX_RETRIES})")
+                    await asyncio.sleep(wait)
+                    continue
+                if resp.status != 200:
+                    print(f"⚠️ {symbol}: HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+        except Exception as e:
+            print(f"⚠️ {symbol}: {e}")
+            await asyncio.sleep(0.5 * attempt)
+            continue
+
+        ret = data.get("retCode")
+        if ret == 0:
+            rows = data.get("result", {}).get("list", [])
+            if not rows:
+                print(f"⚠️ {symbol}: пустой список свечей")
                 return None
-            data = await resp.json()
-    except Exception as e:
-        print(f"⚠️ {symbol}: {e}")
+            rows = list(reversed(rows))
+            df = pd.DataFrame(
+                rows,
+                columns=["time", "open", "high", "low", "close", "volume", "turnover"]
+            )
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            return df.dropna()
+
+        # Rate limit Bybit
+        if ret == 10006:
+            wait = 2.0 * attempt
+            print(
+                f"⚠️ {symbol}: rate limit 10006, жду {wait:.1f}s "
+                f"(попытка {attempt}/{API_MAX_RETRIES})"
+            )
+            await asyncio.sleep(wait)
+            continue
+
+        print(f"⚠️ {symbol}: retCode {ret} — {data.get('retMsg')}")
         return None
 
-    if data.get("retCode") != 0:
-        print(f"⚠️ {symbol}: retCode {data.get('retCode')} — {data.get('retMsg')}")
-        return None
-
-    rows = data.get("result", {}).get("list", [])
-    if not rows:
-        print(f"⚠️ {symbol}: пустой список свечей")
-        return None
-
-    rows = list(reversed(rows))
-    df = pd.DataFrame(
-        rows,
-        columns=["time", "open", "high", "low", "close", "volume", "turnover"]
-    )
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna()
-    return df
+    print(f"⚠️ {symbol}: не удалось после {API_MAX_RETRIES} попыток")
+    return None
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -150,9 +172,9 @@ def mod_climax(row) -> dict | None:
         if not _risk_ok(entry, sl):
             return None
         risk = entry - sl
-        tp = entry + RR_CLIMAX * risk
         return {
-            "direction": "LONG", "entry": entry, "stop": sl, "take": tp,
+            "direction": "LONG", "entry": entry, "stop": sl,
+            "take": entry + RR_CLIMAX * risk,
             "risk_distance": risk, "atr": atr, "module": "Climax",
         }
 
@@ -162,9 +184,9 @@ def mod_climax(row) -> dict | None:
         if not _risk_ok(entry, sl):
             return None
         risk = sl - entry
-        tp = entry - RR_CLIMAX * risk
         return {
-            "direction": "SHORT", "entry": entry, "stop": sl, "take": tp,
+            "direction": "SHORT", "entry": entry, "stop": sl,
+            "take": entry - RR_CLIMAX * risk,
             "risk_distance": risk, "atr": atr, "module": "Climax",
         }
     return None
@@ -195,9 +217,9 @@ def mod_l_long(row) -> dict | None:
     if not _risk_ok(entry, sl):
         return None
     risk = entry - sl
-    tp = entry + RR_L_LONG * risk
     return {
-        "direction": "LONG", "entry": entry, "stop": sl, "take": tp,
+        "direction": "LONG", "entry": entry, "stop": sl,
+        "take": entry + RR_L_LONG * risk,
         "risk_distance": risk, "atr": atr, "module": "L_Long",
     }
 
@@ -239,9 +261,9 @@ def mod_bull_impulse(row, btc_row, breadth: float) -> dict | None:
     if not _risk_ok(entry, sl):
         return None
     risk = entry - sl
-    tp = entry + RR_BULL_IMPULSE * risk
     return {
-        "direction": "LONG", "entry": entry, "stop": sl, "take": tp,
+        "direction": "LONG", "entry": entry, "stop": sl,
+        "take": entry + RR_BULL_IMPULSE * risk,
         "risk_distance": risk, "atr": atr, "module": "Bull_Impulse",
     }
 
@@ -281,16 +303,21 @@ async def scan_once(bot):
     async with aiohttp.ClientSession() as session:
         dfs = {}
         for sym in COINS:
-            df = await fetch_klines(session, sym, limit=300)
+            df = await fetch_klines(session, sym)
             if df is not None and len(df) >= 220:
                 dfs[sym] = add_indicators(df)
             else:
-                print(f"⚠️ {sym}: мало данных ({len(df) if df is not None else 0} свечей)")
-            await asyncio.sleep(0.08)
+                n = len(df) if df is not None else 0
+                if n > 0:
+                    print(f"⚠️ {sym}: мало данных ({n} свечей, нужно ≥220)")
+            await asyncio.sleep(API_SLEEP_SEC)
 
         if "BTCUSDT" not in dfs:
-            print("❌ Нет данных BTC — проверь логи выше")
+            print("❌ Нет данных BTC — rate limit или сеть. Следующий цикл.")
             return
+
+        ok = len(dfs)
+        print(f"📦 Загружено монет: {ok}/{len(COINS)}")
 
         btc = dfs["BTCUSDT"]
         btc_row = btc.iloc[-1]
