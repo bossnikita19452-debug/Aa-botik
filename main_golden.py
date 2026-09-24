@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import configparser
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,48 +60,79 @@ _bot: "GoldenBot | None" = None
 
 
 def load_config() -> configparser.ConfigParser:
+    """
+    Загружает config.ini, если есть.
+    Иначе (или в дополнение) — берёт значения из Environment Variables.
+
+    ENV переменные (Railway Variables):
+      TELEGRAM_BOT_TOKEN  -> TELEGRAM.token
+      CHANNEL_ID          -> TELEGRAM.chat_id
+      ADMIN_IDS           -> TELEGRAM.admin_ids
+      BINANCE_KEY         -> API.binance_key
+      BINANCE_SECRET      -> API.binance_secret
+    """
     cfg = configparser.ConfigParser()
-    if not CONFIG_PATH.exists():
-        logger.warning("config.ini не найден — использую defaults / example")
-        cfg.read_dict(
-            {
-                "API": {"binance_key": "", "binance_secret": "", "testnet": "True"},
-                "TELEGRAM": {"token": "", "chat_id": "", "admin_ids": ""},
-                "RISK": {
-                    "risk_per_trade_pct": "1.0",
-                    "max_open_positions": "3",
-                    "circuit_breaker_losses": "5",
-                    "circuit_breaker_pause_minutes": "60",
-                },
-                "SCANNER": {
-                    "timeframe": "15m",
-                    "check_interval_minutes": "15",
-                    "position_check_seconds": "60",
-                },
-                "BRK": {
-                    "volume_mult": "2.5",
-                    "rsi_long_min": "55",
-                    "rsi_long_max": "70",
-                    "rsi_short_min": "30",
-                    "rsi_short_max": "45",
-                    "retest_bars": "8",
-                    "sl_atr_min": "0.3",
-                    "sl_atr_max": "1.5",
-                    "rr": "1.5",
-                    "time_stop_bars": "24",
-                },
-                "MR": {
-                    "rsi_long_max": "30",
-                    "rsi_short_min": "70",
-                    "atr_mult_max": "1.5",
-                    "sl_pct": "1.0",
-                    "time_stop_bars": "24",
-                },
-                "PHASE": {"ema_fast": "50", "ema_slow": "200", "adx_period": "14", "adx_min": "20"},
-            }
-        )
-        return cfg
-    cfg.read(CONFIG_PATH, encoding="utf-8")
+
+    # 1. Сначала defaults
+    cfg.read_dict({
+        "API": {"binance_key": "", "binance_secret": "", "testnet": "True"},
+        "TELEGRAM": {"token": "", "chat_id": "", "admin_ids": ""},
+        "RISK": {
+            "risk_per_trade_pct": "1.0",
+            "max_open_positions": "3",
+            "circuit_breaker_losses": "5",
+            "circuit_breaker_pause_minutes": "60",
+        },
+        "SCANNER": {
+            "timeframe": "15m",
+            "check_interval_minutes": "15",
+            "position_check_seconds": "60",
+        },
+        "BRK": {
+            "volume_mult": "2.5",
+            "rsi_long_min": "55",
+            "rsi_long_max": "70",
+            "rsi_short_min": "30",
+            "rsi_short_max": "45",
+            "retest_bars": "8",
+            "sl_atr_min": "0.3",
+            "sl_atr_max": "1.5",
+            "rr": "1.5",
+            "time_stop_bars": "24",
+        },
+        "MR": {
+            "rsi_long_max": "30",
+            "rsi_short_min": "70",
+            "atr_mult_max": "1.5",
+            "sl_pct": "1.0",
+            "time_stop_bars": "24",
+        },
+        "PHASE": {"ema_fast": "50", "ema_slow": "200", "adx_period": "14", "adx_min": "20"},
+    })
+
+    # 2. Потом config.ini (если есть)
+    if CONFIG_PATH.exists():
+        cfg.read(CONFIG_PATH, encoding="utf-8")
+        logger.info("config.ini загружен")
+    else:
+        logger.warning("config.ini не найден — беру из ENV / defaults")
+
+    # 3. ENV имеет приоритет над файлом
+    env_map = {
+        ("TELEGRAM", "token"): "TELEGRAM_BOT_TOKEN",
+        ("TELEGRAM", "chat_id"): "CHANNEL_ID",
+        ("TELEGRAM", "admin_ids"): "ADMIN_IDS",
+        ("API", "binance_key"): "BINANCE_KEY",
+        ("API", "binance_secret"): "BINANCE_SECRET",
+    }
+    for (section, key), env_name in env_map.items():
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            if not cfg.has_section(section):
+                cfg.add_section(section)
+            cfg.set(section, key, val)
+            logger.info("ENV %s -> [%s] %s", env_name, section, key)
+
     return cfg
 
 
@@ -163,10 +195,9 @@ class GoldenBot:
         self._scan_lock = asyncio.Lock()
 
         # ─── БЛОКИРОВКА ПОВТОРНЫХ ВХОДОВ (эмуляция used set) ───
-        # symbol -> datetime последнего сигнала
         self.last_signal_time: dict[str, datetime] = {}
         self.lock_bars = 8
-        self.tf_seconds = 15 * 60  # 15m
+        self.tf_seconds = 15 * 60
 
     def is_admin(self, user_id: int) -> bool:
         if not self.admin_ids:
@@ -174,15 +205,15 @@ class GoldenBot:
         return user_id in self.admin_ids
 
     def circuit_active(self) -> bool:
-        return time.time() < self.paused_until
+        return time.time() <        self.paused_until
 
-    def trigger_circuit(self, reason: str):
-        mins = self.cfg.getint("RISK", "circuit_breaker_pause_minutes", fallback=60)
+    def trigger_c dfircuit(self, = reason: str):
+        mins = self.c fetchfg.getint("RISK", "circ_uit_breaker_pause_minutes", fallklback=60)
         self.paused_until = time.time() + mins * 60
         self.tg.circuit_breaker(reason, mins)
 
     def update_phase(self):
-        df = fetch_klines("BTCUSDT", interval="1d", limit=250, futures=True)
+ines("BTCUSDT", interval="1d", limit=250, futures=True)
         if df is None:
             logger.error("BTC 1d load failed")
             return
@@ -309,7 +340,7 @@ class GoldenBot:
             last = self.last_signal_time.get(symbol)
             if last is not None:
                 elapsed = (now_utc - last).total_seconds()
-                lock_seconds = self.lock_bars * self.tf_seconds  # 7200 сек = 2ч
+                lock_seconds = self.lock_bars * self.tf_seconds
                 if elapsed < lock_seconds:
                     continue
             # ────────────────────────────────────────────────
@@ -363,7 +394,7 @@ class GoldenBot:
                 except Exception as e:
                     self.tg.error(str(e))
 
-            # ─── ФИКСИРУЕМ ВРЕМЯ СИГНАЛА ДЛЯ БЛОКИРОВКИ ──────
+            # ─── ФИКСИРУЕМ ВРЕМЯ СИГНАЛА ────────────────────
             if opened:
                 self.last_signal_time[symbol] = datetime.now(timezone.utc)
             # ────────────────────────────────────────────────
@@ -523,7 +554,7 @@ def main():
     _bot = GoldenBot()
 
     if not _bot.token:
-        logger.error("TELEGRAM token пустой в config.ini — выход")
+        logger.error("TELEGRAM token пустой — выход")
         _bot.update_phase()
         while True:
             _bot.scan_once_sync()
