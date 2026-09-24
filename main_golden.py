@@ -351,7 +351,19 @@ class GoldenBot:
                 amount = 1.0
 
             logger.info("SIGNAL %s %s %s", sig.strategy, sig.side, symbol)
-            self.tg.entry(sig.side, symbol, sig.entry, sig.stop, sig.take, self.risk_pct, sig.strategy)
+
+            # Для BRK передаём level (уровень ретеста) для отображения разрыва
+            if sig.strategy in ("BRK_LONG", "BRK_SHORT"):
+                self.tg.entry(
+                    sig.side, symbol, sig.entry, sig.stop, sig.take,
+                    self.risk_pct, sig.strategy,
+                    level=getattr(sig, "breakout_level", None)
+                )
+            else:
+                self.tg.entry(
+                    sig.side, symbol, sig.entry, sig.stop, sig.take,
+                    self.risk_pct, sig.strategy
+                )
 
             opened = False
 
@@ -386,10 +398,10 @@ async def cmd_start(update, context):
     mode = "paper" if (_bot and _bot.paper) else "live"
     text = (
         "Golden Scanner\n\n"
-        "Phase BTC: " + str(phase) + "\n"
-        "Scanner: " + ("on" if scanning else "off") + "\n"
-        "Mode: " + mode + "\n\n"
-        "Choose action:"
+        "Фаза BTC: " + str(phase) + "\n"
+        "Сканер: " + ("вкл" if scanning else "выкл") + "\n"
+        "Режим: " + mode + "\n\n"
+        "Выберите действие:"
     )
     await update.message.reply_text(text, reply_markup=main_menu(scanning))
 
@@ -404,9 +416,10 @@ async def on_button(update, context):
     if data == "stats":
         st = get_stats()
         lines = [
-            "Statistics Golden Scanner\n",
-            "Total: " + str(st["total"]),
-            "Open: " + str(st["open"]),
+            "Статистика Golden Scanner",
+            "",
+            "Всего: " + str(st["total"]),
+            "Открыто: " + str(st["open"]),
             "TP: " + str(st["win"]),
             "SL: " + str(st["loss"]),
             "TIME: " + str(st["expired"]),
@@ -418,17 +431,17 @@ async def on_button(update, context):
             "Total R: " + str(round(st["total_r"], 2)),
             "Total PnL: $" + str(round(st["total_pnl"], 2)),
             "",
-            "Phase: " + str(get_state("btc_phase", "?")),
+            "Фаза: " + str(get_state("btc_phase", "?")),
         ]
         await query.edit_message_text("\n".join(lines), reply_markup=main_menu())
 
     elif data == "last_signals":
         rows = get_recent_trades(10)
         if not rows:
-            await query.edit_message_text("No trades yet.", reply_markup=main_menu())
+            await query.edit_message_text("Пока нет сделок.", reply_markup=main_menu())
             return
         reason_map = {"TP": "TP", "SL": "SL", "TIME": "TIME", None: "", "": ""}
-        text = "Last 10:\n\n"
+        text = "Последние 10:\n\n"
         for r in rows:
             if r["status"] == "open":
                 mark = "OPEN"
@@ -444,9 +457,9 @@ async def on_button(update, context):
     elif data == "open_pos":
         rows = get_open_trades()
         if not rows:
-            await query.edit_message_text("No open positions.", reply_markup=main_menu())
+            await query.edit_message_text("Нет открытых позиций.", reply_markup=main_menu())
             return
-        text = "Open:\n\n"
+        text = "Открытые:\n\n"
         for r in rows:
             de = "LONG" if r["side"] == "LONG" else "SHORT"
             text += de + " " + str(r["symbol"]) + " | " + str(r["strategy"]) + "\n"
@@ -454,33 +467,33 @@ async def on_button(update, context):
 
     elif data == "toggle_scan":
         if _bot and not _bot.is_admin(uid):
-            await query.answer("No access", show_alert=True)
+            await query.answer("Нет доступа", show_alert=True)
             return
         new_state = not is_scanning_enabled()
         set_scanning_enabled(new_state)
-        await query.answer("Scanner on" if new_state else "Scanner off")
+        await query.answer("Сканер включён" if new_state else "Сканер выключен")
         phase = get_state("btc_phase", "?")
-        text = "Golden Scanner\nScanner: " + ("on" if new_state else "off") + "\nPhase: " + str(phase)
+        text = "Golden Scanner\nСканер: " + ("вкл" if new_state else "выкл") + "\nФаза: " + str(phase)
         await query.edit_message_text(text, reply_markup=main_menu(new_state))
 
     elif data == "force_scan":
         if _bot and not _bot.is_admin(uid):
-            await query.answer("No access", show_alert=True)
+            await query.answer("Нет доступа", show_alert=True)
             return
-        await query.edit_message_text("Scanning...")
+        await query.edit_message_text("Сканирую...")
         if _bot:
             n = await asyncio.to_thread(_bot.scan_once_sync)
-            await query.edit_message_text("Scan done. New signals: " + str(n), reply_markup=main_menu())
+            await query.edit_message_text("Скан завершён. Новых: " + str(n), reply_markup=main_menu())
         else:
-            await query.edit_message_text("Bot not initialized", reply_markup=main_menu())
+            await query.edit_message_text("Бот не инициализирован", reply_markup=main_menu())
 
     elif data == "check_pos":
-        await query.edit_message_text("Checking positions...")
+        await query.edit_message_text("Проверяю позиции...")
         if _bot:
             n = await asyncio.to_thread(_bot.check_positions_sync)
-            await query.edit_message_text("Check done. Closed: " + str(n), reply_markup=main_menu())
+            await query.edit_message_text("Проверка готова. Закрыто: " + str(n), reply_markup=main_menu())
         else:
-            await query.edit_message_text("Error", reply_markup=main_menu())
+            await query.edit_message_text("Ошибка", reply_markup=main_menu())
 
 
 async def job_scan(context):
