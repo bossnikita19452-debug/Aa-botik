@@ -1,19 +1,23 @@
 """BRK_LONG — пробой вверх (фаза UPTREND). Приведён к эталону Colab.
 
-Добавлен фильтр MAX_ENTRY_GAP = 1.0%:
-если open следующей свечи ушёл от уровня ретеста больше чем на 1% — сделку пропускаем.
-Это отсекает сделки с плохой точкой входа (проверено на Colab: WR 60.7% → 63.9%).
+Фильтры:
+- MAX_ENTRY_GAP = 1.0% — entry не дальше 1% от уровня ретеста.
+- ATR_FILTER = 1.5× — не входим, если ATR(14) > 1.5 × SMA(ATR, 30).
+
+Проверено на Colab: WR лесенок 55.6% → 63.6%, доходность +15%.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 
 LOCK_BARS = 8
-MAX_ENTRY_GAP = 0.01  # 1.0%
+MAX_ENTRY_GAP = 0.01       # 1.0%
+ATR_FILTER_MULT = 1.5      # ATR(14) > 1.5 × SMA(ATR,30) → пропускаем
 
 
 @dataclass
@@ -37,7 +41,7 @@ def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
     3. volume > 2.5 * SMA(volume, 20)
     4. RSI 55..70
 
-    Возвращает level = high_40 (уровень пробоя), bar_index абсолютный.
+    Возвращает level = high_40, bar_index абсолютный.
     """
     if df is None or len(df) < 50:
         return None
@@ -61,6 +65,15 @@ def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
     rsi = row.get("rsi14")
     if rsi is None or not (cfg.get("rsi_long_min", 55) <= rsi <= cfg.get("rsi_long_max", 70)):
         return None
+
+    # ─── ФИЛЬТР ВОЛАТИЛЬНОСТИ ──────────────────────────────
+    atr_val = row.get("atr14")
+    atr_sma = row.get("atr_sma30")
+    if atr_val is not None and atr_sma is not None:
+        if np.isfinite(atr_val) and np.isfinite(atr_sma) and atr_sma > 0:
+            if atr_val > ATR_FILTER_MULT * atr_sma:
+                return None
+    # ──────────────────────────────────────────────────────
 
     return {
         "level": float(row["high_40"]),
@@ -97,12 +110,10 @@ def check_retest_entry(
             entry_row = df.iloc[j + 1]
             entry = float(entry_row["open"])
 
-            # ─── ФИЛЬТР: entry не должен быть слишком далеко от level
             if level > 0:
                 gap = (entry - level) / level
                 if gap > MAX_ENTRY_GAP:
                     return None
-            # ──────────────────────────────────────────────────
 
             atr = float(entry_row["atr14"]) if pd.notna(entry_row.get("atr14")) else entry * 0.01
 
