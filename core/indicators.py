@@ -1,4 +1,4 @@
-"""Индикаторы для Golden Scanner: RSI, EMA, BB, ATR, ADX."""
+"""Индикаторы для Golden Scanner: RSI, EMA, BB, ATR, ADX. Приведены к эталону Colab."""
 from __future__ import annotations
 
 import numpy as np
@@ -14,14 +14,27 @@ def sma(series: pd.Series, length: int) -> pd.Series:
 
 
 def rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    """
+    RSI с SMA-сглаживанием (как в Colab-бэктесте).
+    Было: ewm(alpha=1/length) — RMA Wilder.
+    Стало: rolling(length).mean() — SMA.
+    """
     delta = close.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1 / length, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1 / length, adjust=False).mean()
+    gain = delta.clip(lower=0).rolling(length).mean()
+    loss = (-delta.clip(upper=0)).rolling(length).mean()
     rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    """
+    ATR с SMA-сглаживанием (как в Colab-бэктесте).
+    Было: ewm(alpha=1/length) — RMA Wilder.
+    Стало: rolling(length).mean() — SMA.
+
+    Это критично: ATR влияет на clamp стопа и TP. RMA давал ATR на 10-15%
+    больше SMA → стоп дальше → TP дальше → WR падал.
+    """
     tr = pd.concat(
         [
             high - low,
@@ -30,7 +43,7 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> 
         ],
         axis=1,
     ).max(axis=1)
-    return tr.ewm(alpha=1 / length, adjust=False).mean()
+    return tr.rolling(length).mean()
 
 
 def bollinger(
