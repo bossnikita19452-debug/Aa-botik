@@ -16,8 +16,6 @@ def sma(series: pd.Series, length: int) -> pd.Series:
 def rsi(close: pd.Series, length: int = 14) -> pd.Series:
     """
     RSI с SMA-сглаживанием (как в Colab-бэктесте).
-    Было: ewm(alpha=1/length) — RMA Wilder.
-    Стало: rolling(length).mean() — SMA.
     """
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(length).mean()
@@ -29,11 +27,6 @@ def rsi(close: pd.Series, length: int = 14) -> pd.Series:
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
     """
     ATR с SMA-сглаживанием (как в Colab-бэктесте).
-    Было: ewm(alpha=1/length) — RMA Wilder.
-    Стало: rolling(length).mean() — SMA.
-
-    Это критично: ATR влияет на clamp стопа и TP. RMA давал ATR на 10-15%
-    больше SMA → стоп дальше → TP дальше → WR падал.
     """
     tr = pd.concat(
         [
