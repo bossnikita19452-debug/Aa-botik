@@ -1,4 +1,9 @@
-"""Подключение к Binance USDT-M Futures через ccxt. Demo / real."""
+"""Подключение к Binance USDT-M Futures через ccxt. Demo / real.
+
+Исправлено:
+1. def __init__ — было def __init( (пропущены два подчёркивания).
+2. Demo URL — явный https://demo-fapi.binance.com для Binance Demo Trading.
+"""
 from __future__ import annotations
 
 import logging
@@ -8,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class ExchangeClient:
-    def __init(
+    def __init__(
         self,
         api_key: str = "",
         api_secret: str = "",
@@ -29,13 +34,28 @@ class ExchangeClient:
             "options": {"defaultType": "future"},
         }
         self._exchange = ccxt.binanceusdm(opts)
+
         if self.testnet:
-            self._exchange.set_sandbox_mode(True)
-            # Demo Trading endpoint
-            self._exchange.urls["api"] = self._exchange.urls.get("test", self._exchange.urls["api"])
-            logger.info("Exchange: Binance USDT-M DEMO (testnet)")
+            # Binance Demo Trading (актуальный URL на 2026)
+            # НЕ используем set_sandbox_mode — он даёт устаревший testnet URL
+            if "urls" not in self._exchange.__dict__:
+                self._exchange.urls = {}
+            self._exchange.urls["api"] = {
+                "public": "https://demo-fapi.binance.com/fapi/v1",
+                "private": "https://demo-fapi.binance.com/fapi/v1",
+                "v2": {
+                    "public": "https://demo-fapi.binance.com/fapi/v2",
+                    "private": "https://demo-fapi.binance.com/fapi/v2",
+                },
+                "v3": {
+                    "public": "https://demo-fapi.binance.com/fapi/v3",
+                    "private": "https://demo-fapi.binance.com/fapi/v3",
+                },
+            }
+            logger.info("Exchange: Binance USDT-M DEMO (demo-fapi)")
         else:
             logger.info("Exchange: Binance USDT-M LIVE")
+
         return self._exchange
 
     @property
@@ -58,7 +78,12 @@ class ExchangeClient:
             return 0.0
 
     def position_size(self, equity: float, risk_pct: float, entry: float, stop: float) -> float:
-        """position_size = (equity * risk_pct/100) / abs(entry - stop)"""
+        """
+        position_size = (equity * risk_pct/100) / abs(entry - stop)
+
+        Например: equity=10000, risk=1%, entry=100, stop=99
+        → risk_usd = 100, dist = 1 → size = 100 единиц базового актива.
+        """
         risk_usd = equity * (risk_pct / 100.0)
         dist = abs(entry - stop)
         if dist <= 0 or risk_usd <= 0:
@@ -70,7 +95,6 @@ class ExchangeClient:
     ) -> Optional[dict]:
         """side: buy | sell"""
         try:
-            # ccxt unified: BTC/USDT:USDT for futures often
             sym = self._normalize_symbol(symbol)
             order = self.exchange.create_order(
                 sym, "market", side.lower(), amount, params=params or {}
@@ -95,7 +119,6 @@ class ExchangeClient:
                 "reduceOnly": True,
                 "closePosition": True,
             }
-            # amount optional when closePosition=True on Binance
             amt = amount if amount is not None else 0
             order = self.exchange.create_order(
                 sym, "STOP_MARKET", side.lower(), amt, params=params
