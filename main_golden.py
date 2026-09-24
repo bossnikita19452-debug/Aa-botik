@@ -1,16 +1,21 @@
 """
-Golden Scanner Bot — точка входа.
-Планировщик: каждые 15 мин скан, раз в сутки фаза BTC.
+Golden Scanner Bot — Telegram + скан + SL/TP мониторинг.
 Запуск: python main_golden.py
-Требует config.ini (см. config.ini.example).
+
+/start — меню
+Кнопки: статистика, сигналы, старт/стоп сканера, скан сейчас, проверить позиции
 """
 from __future__ import annotations
 
+import asyncio
 import configparser
 import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from core.data import fetch_klines
 from core.exchange import ExchangeClient
@@ -22,11 +27,17 @@ from strategies.brk_short import scan_brk_short
 from strategies.mr_long import scan_mr_long
 from strategies.mr_short import scan_mr_short
 from storage.db import (
+    close_trade,
     count_open,
+    get_open_trades,
+    get_recent_trades,
     get_state,
+    get_stats,
     has_open,
     init_db,
+    is_scanning_enabled,
     save_open_trade,
+    set_scanning_enabled,
     set_state,
 )
 from bot.telegram_notify import TelegramNotifier
@@ -43,28 +54,28 @@ logger = logging.getLogger("golden")
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.ini"
 
+# shared bot instance for jobs
+_bot: "GoldenBot | None" = None
+
 
 def load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     if not CONFIG_PATH.exists():
-        example = Path(__file__).resolve().parent / "config.ini.example"
-        if example.exists():
-            logger.warning("config.ini не найден — скопируй config.ini.example → config.ini")
+        logger.warning("config.ini не найден — использую defaults / example")
         cfg.read_dict(
             {
                 "API": {"binance_key": "", "binance_secret": "", "testnet": "True"},
-                "TELEGRAM": {"token": "", "chat_id": ""},
+                "TELEGRAM": {"token": "", "chat_id": "", "admin_ids": ""},
                 "RISK": {
                     "risk_per_trade_pct": "1.0",
                     "max_open_positions": "3",
-                    "max_daily_loss_pct": "5.0",
                     "circuit_breaker_losses": "5",
                     "circuit_breaker_pause_minutes": "60",
                 },
                 "SCANNER": {
                     "timeframe": "15m",
-                    "btc_phase_timeframe": "1d",
                     "check_interval_minutes": "15",
+                    "position_check_seconds": "60",
                 },
                 "BRK": {
                     "volume_mult": "2.5",
@@ -76,12 +87,14 @@ def load_config() -> configparser.ConfigParser:
                     "sl_atr_min": "0.3",
                     "sl_atr_max": "1.5",
                     "rr": "1.5",
+                    "time_stop_bars": "24",
                 },
                 "MR": {
                     "rsi_long_max": "30",
                     "rsi_short_min": "70",
                     "atr_mult_max": "1.5",
                     "sl_pct": "1.0",
+                    "time_stop_bars": "24",
                 },
                 "PHASE": {"ema_fast": "50", "ema_slow": "200", "adx_period": "14", "adx_min": "20"},
             }
@@ -97,7 +110,7 @@ def section_dict(cfg: configparser.ConfigParser, name: str) -> dict:
     out = {}
     for k, v in cfg.items(name):
         try:
-            if "." in v:
+            if "." in str(v):
                 out[k] = float(v)
             else:
                 out[k] = int(v)
@@ -106,13 +119,31 @@ def section_dict(cfg: configparser.ConfigParser, name: str) -> dict:
     return out
 
 
+def main_menu(scanning: bool | None = None) -> InlineKeyboardMarkup:
+    if scanning is None:
+        scanning = is_scanning_enabled()
+    scan_label = "⏸ Остановить сканер" if scanning else "▶️ Запустить сканер"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
+            [InlineKeyboardButton("📋 Последние сигналы", callback_data="last_signals")],
+            [InlineKeyboardButton("📂 Открытые позиции", callback_data="open_pos")],
+            [InlineKeyboardButton(scan_label, callback_data="toggle_scan")],
+            [InlineKeyboardButton("🔄 Сканировать сейчас", callback_data="force_scan")],
+            [InlineKeyboardButton("🔍 Проверить SL/TP", callback_data="check_pos")],
+        ]
+    )
+
+
 class GoldenBot:
     def __init__(self):
         self.cfg = load_config()
-        self.tg = TelegramNotifier(
-            self.cfg.get("TELEGRAM", "token", fallback=""),
-            self.cfg.get("TELEGRAM", "chat_id", fallback=""),
-        )
+        self.token = self.cfg.get("TELEGRAM", "token", fallback="").strip()
+        self.chat_id = self.cfg.get("TELEGRAM", "chat_id", fallback="").strip()
+        admin_raw = self.cfg.get("TELEGRAM", "admin_ids", fallback="")
+        self.admin_ids = [int(x) for x in admin_raw.split(",") if x.strip().isdigit()]
+
+        self.tg = TelegramNotifier(self.token, self.chat_id)
         testnet = self.cfg.getboolean("API", "testnet", fallback=True)
         self.ex = ExchangeClient(
             self.cfg.get("API", "binance_key", fallback=""),
@@ -120,17 +151,21 @@ class GoldenBot:
             testnet=testnet,
         )
         self.phase = MarketPhase.RANGE
-        self.consecutive_losses = 0
         self.paused_until = 0.0
+        self.consecutive_losses = 0
         self.tf = self.cfg.get("SCANNER", "timeframe", fallback="15m")
         self.risk_pct = self.cfg.getfloat("RISK", "risk_per_trade_pct", fallback=1.0)
         self.max_pos = self.cfg.getint("RISK", "max_open_positions", fallback=3)
         self.brk_cfg = section_dict(self.cfg, "BRK")
         self.mr_cfg = section_dict(self.cfg, "MR")
         self.phase_cfg = section_dict(self.cfg, "PHASE")
-        self.paper = not bool(
-            self.cfg.get("API", "binance_key", fallback="").strip()
-        )  # без ключей — только сигналы
+        self.paper = not bool(self.cfg.get("API", "binance_key", fallback="").strip())
+        self._scan_lock = asyncio.Lock()
+
+    def is_admin(self, user_id: int) -> bool:
+        if not self.admin_ids:
+            return True  # если список пуст — разрешаем всем
+        return user_id in self.admin_ids
 
     def circuit_active(self) -> bool:
         return time.time() < self.paused_until
@@ -138,16 +173,13 @@ class GoldenBot:
     def trigger_circuit(self, reason: str):
         mins = self.cfg.getint("RISK", "circuit_breaker_pause_minutes", fallback=60)
         self.paused_until = time.time() + mins * 60
-        logger.warning("Circuit breaker: %s (%s min)", reason, mins)
         self.tg.circuit_breaker(reason, mins)
 
     def update_phase(self):
         df = fetch_klines("BTCUSDT", interval="1d", limit=250, futures=True)
         if df is None:
-            logger.error("Не удалось загрузить BTC 1d")
+            logger.error("BTC 1d load failed")
             return
-        df = df.rename(columns={"open_time": "time"})
-        # phase expects high/low/close
         phase = detect_btc_phase(
             df,
             ema_fast=int(self.phase_cfg.get("ema_fast", 50)),
@@ -156,24 +188,101 @@ class GoldenBot:
             adx_min=float(self.phase_cfg.get("adx_min", 20)),
         )
         if phase != self.phase:
-            logger.info("Фаза BTC: %s → %s", self.phase.value, phase.value)
+            logger.info("Фаза: %s → %s", self.phase.value, phase.value)
             self.tg.phase(phase.value)
         self.phase = phase
         set_state("btc_phase", phase.value)
 
-    def scan_once(self):
+    def check_positions_sync(self):
+        """Проверка open сделок по last price → SL / TP / TIME."""
+        opens = get_open_trades()
+        if not opens:
+            return 0
+        closed_n = 0
+        for t in opens:
+            symbol = t["symbol"]
+            df = fetch_klines(symbol, interval=self.tf, limit=30, futures=True)
+            if df is None or df.empty:
+                continue
+            last = df.iloc[-1]
+            high, low, close = float(last["high"]), float(last["low"]), float(last["close"])
+            entry = float(t["entry_price"])
+            stop = float(t["stop_price"])
+            take = float(t["take_price"])
+            side = t["side"]
+            qty = float(t["quantity"] or 0)
+            risk = abs(entry - stop) or 1e-12
+
+            exit_price = None
+            reason = None
+
+            if side == "LONG":
+                if low <= stop:
+                    exit_price, reason = stop, "SL"
+                elif high >= take:
+                    exit_price, reason = take, "TP"
+            else:
+                if high >= stop:
+                    exit_price, reason = stop, "SL"
+                elif low <= take:
+                    exit_price, reason = take, "TP"
+
+            # time stop ~24 bars * 15m = 6h
+            try:
+                entry_ts = datetime.fromisoformat(t["entry_time"].replace("Z", "+00:00"))
+                if entry_ts.tzinfo is None:
+                    entry_ts = entry_ts.replace(tzinfo=timezone.utc)
+                hours = (datetime.now(timezone.utc) - entry_ts).total_seconds() / 3600
+                if reason is None and hours >= 6:
+                    exit_price, reason = close, "TIME"
+            except Exception:
+                pass
+
+            if exit_price is None or reason is None:
+                continue
+
+            if side == "LONG":
+                r_mult = (exit_price - entry) / risk
+                pnl = (exit_price - entry) * qty
+            else:
+                r_mult = (entry - exit_price) / risk
+                pnl = (entry - exit_price) * qty
+
+            close_trade(int(t["id"]), exit_price, reason, round(r_mult, 3), round(pnl, 4))
+            closed_n += 1
+
+            if reason == "TP":
+                self.tg.exit_tp(symbol, r_mult, pnl)
+                self.consecutive_losses = 0
+            elif reason == "SL":
+                self.tg.exit_sl(symbol, r_mult, pnl)
+                self.consecutive_losses += 1
+                max_l = self.cfg.getint("RISK", "circuit_breaker_losses", fallback=5)
+                if self.consecutive_losses >= max_l:
+                    self.trigger_circuit(f"{max_l} убытков подряд")
+                    self.consecutive_losses = 0
+            else:
+                self.tg.exit_time(symbol, r_mult, pnl)
+
+            logger.info("CLOSED %s %s %s R=%.2f", symbol, reason, side, r_mult)
+        return closed_n
+
+    def scan_once_sync(self):
+        if not is_scanning_enabled():
+            logger.info("Сканер выключен")
+            return 0
         if self.circuit_active():
-            logger.info("Пауза circuit breaker до %s", datetime.fromtimestamp(self.paused_until, tz=timezone.utc))
-            return
+            logger.info("Circuit breaker active")
+            return 0
 
         open_n = count_open()
         if open_n >= self.max_pos:
             logger.info("Лимит позиций %s/%s", open_n, self.max_pos)
-            return
+            return 0
 
         strategies = active_strategies(self.phase)
         symbols = pairs_for_phase(self.phase.value)
-        logger.info("Скан | фаза=%s | стратегии=%s | пар=%s", self.phase.value, strategies, len(symbols))
+        logger.info("Скан фаза=%s strat=%s pairs=%s", self.phase.value, strategies, len(symbols))
 
         equity = 1000.0
         if not self.paper:
@@ -181,7 +290,6 @@ class GoldenBot:
                 self.ex.connect()
                 equity = self.ex.fetch_balance() or 1000.0
             except Exception as e:
-                logger.error("Balance: %s", e)
                 self.tg.error(str(e))
 
         found = 0
@@ -211,16 +319,17 @@ class GoldenBot:
 
             amount = self.ex.position_size(equity, self.risk_pct, sig.entry, sig.stop)
             if amount <= 0:
-                continue
+                amount = 1.0  # paper placeholder
 
-            logger.info(
-                "SIGNAL %s %s %s entry=%.6g sl=%.6g tp=%.6g",
-                sig.strategy, sig.side, symbol, sig.entry, sig.stop, sig.take,
+            logger.info("SIGNAL %s %s %s", sig.strategy, sig.side, symbol)
+            self.tg.entry(
+                sig.side, symbol, sig.entry, sig.stop, sig.take, self.risk_pct, sig.strategy
             )
-            self.tg.entry(sig.side, symbol, sig.entry, sig.stop, sig.take, self.risk_pct, sig.strategy)
 
             if self.paper:
-                save_open_trade(symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take)
+                save_open_trade(
+                    symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take
+                )
                 found += 1
             else:
                 try:
@@ -233,33 +342,190 @@ class GoldenBot:
                     else:
                         self.tg.error(f"Order failed {symbol}")
                 except Exception as e:
-                    logger.exception("Order %s", symbol)
                     self.tg.error(str(e))
+            time.sleep(0.15)
 
-            time.sleep(0.2)
+        logger.info("Скан: новых %s", found)
+        return found
 
-        logger.info("Скан завершён, новых сигналов: %s", found)
 
-    def run_loop(self):
-        init_db()
-        interval = self.cfg.getint("SCANNER", "check_interval_minutes", fallback=15) * 60
-        logger.info("Golden Scanner старт | paper=%s | interval=%ss", self.paper, interval)
-        self.update_phase()
-        last_phase_day = datetime.now(timezone.utc).date()
+# ─── Telegram handlers ───────────────────────────────────────────
 
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phase = get_state("btc_phase", "?")
+    scanning = is_scanning_enabled()
+    mode = "📄 paper" if (_bot and _bot.paper) else "💰 live"
+    text = (
+        "🤖 <b>Golden Scanner</b>\n\n"
+        f"Фаза BTC: <b>{phase}</b>\n"
+        f"Сканер: {'▶️ вкл' if scanning else '⏸ выкл'}\n"
+        f"Режим: {mode}\n"
+        f"Стратегии: BRK + MR по фазе\n\n"
+        "Выберите действие:"
+    )
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=main_menu(scanning))
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _bot
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    uid = query.from_user.id if query.from_user else 0
+
+    if data == "stats":
+        st = get_stats()
+        lines = [
+            "📈 <b>Статистика Golden Scanner</b>\n",
+            f"Всего сделок: <b>{st['total']}</b>",
+            f"⏳ Открыто: <b>{st['open']}</b>",
+            f"✅ TP: <b>{st['win']}</b>",
+            f"❌ SL: <b>{st['loss']}</b>",
+            f"⏰ TIME: <b>{st['expired']}</b>",
+            f"\n<b>Winrate: {st['wr']}%</b>",
+            f"🟢 LONG WR: {st['long_wr']}% ({st['long_win']}/{st['long_win']+st['long_loss']})",
+            f"🔴 SHORT WR: {st['short_wr']}% ({st['short_win']}/{st['short_win']+st['short_loss']})",
+            f"\nΣ R: <b>{st['total_r']:+.2f}</b>",
+            f"Σ PnL: <b>${st['total_pnl']:+.2f}</b>",
+            f"\nФаза: {get_state('btc_phase', '?')}",
+        ]
+        if st["by_strategy"]:
+            lines.append("\nПо стратегиям:")
+            for s in st["by_strategy"]:
+                n = s.get("n") or 0
+                w = s.get("w") or 0
+                wr = round(w / n * 100, 1) if n else 0
+                lines.append(f"  {s['strategy']}: WR {wr}% ({w}/{n})")
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=main_menu()
+        )
+
+    elif data == "last_signals":
+        rows = get_recent_trades(10)
+        if not rows:
+            await query.edit_message_text("Пока нет сделок.", reply_markup=main_menu())
+            return
+        status_map = {"open": "⏳", "closed": ""}
+        reason_map = {"TP": "✅", "SL": "❌", "TIME": "⏰", None: "", "": ""}
+        text = "<b>Последние 10:</b>\n\n"
+        for r in rows:
+            if r["status"] == "open":
+                mark = "⏳"
+            else:
+                mark = reason_map.get(r.get("exit_reason"), "⚪")
+            de = "🟢" if r["side"] == "LONG" else "🔴"
+            extra = ""
+            if r["status"] == "closed" and r.get("r_multiple") is not None:
+                extra = f" | R {r['r_multiple']:+.2f}"
+            text += f"{mark} {de} {r['symbol']} {r['strategy']} @ {r['entry_price']:.4g}{extra}\n"
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
+
+    elif data == "open_pos":
+        rows = get_open_trades()
+        if not rows:
+            await query.edit_message_text("Нет открытых позиций.", reply_markup=main_menu())
+            return
+        text = "<b>Открытые:</b>\n\n"
+        for r in rows:
+            de = "🟢" if r["side"] == "LONG" else "🔴"
+            text += (
+                f"{de} {r['symbol']} | {r['strategy']}\n"
+                f"  Entry {r['entry_price']:.6g} SL {r['stop_price']:.6g} TP {r['take_price']:.6g}\n"
+            )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
+
+    elif data == "toggle_scan":
+        if _bot and not _bot.is_admin(uid):
+            await query.answer("Нет доступа", show_alert=True)
+            return
+        new_state = not is_scanning_enabled()
+        set_scanning_enabled(new_state)
+        await query.answer("Сканер включён" if new_state else "Сканер выключен")
+        phase = get_state("btc_phase", "?")
+        text = (
+            f"🤖 <b>Golden Scanner</b>\n"
+            f"Сканер: {'▶️ вкл' if new_state else '⏸ выкл'}\n"
+            f"Фаза: {phase}"
+        )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu(new_state))
+
+    elif data == "force_scan":
+        if _bot and not _bot.is_admin(uid):
+            await query.answer("Нет доступа", show_alert=True)
+            return
+        await query.edit_message_text("🔄 Сканирую...")
+        if _bot:
+            n = await asyncio.to_thread(_bot.scan_once_sync)
+            await query.edit_message_text(
+                f"✅ Скан завершён. Новых сигналов: {n}", reply_markup=main_menu()
+            )
+        else:
+            await query.edit_message_text("Бот не инициализирован", reply_markup=main_menu())
+
+    elif data == "check_pos":
+        await query.edit_message_text("🔍 Проверяю позиции...")
+        if _bot:
+            n = await asyncio.to_thread(_bot.check_positions_sync)
+            await query.edit_message_text(
+                f"✅ Проверка готова. Закрыто: {n}", reply_markup=main_menu()
+            )
+        else:
+            await query.edit_message_text("Ошибка", reply_markup=main_menu())
+
+
+async def job_scan(context: ContextTypes.DEFAULT_TYPE):
+    if not _bot:
+        return
+    async with _bot._scan_lock:
+        await asyncio.to_thread(_bot.scan_once_sync)
+
+
+async def job_positions(context: ContextTypes.DEFAULT_TYPE):
+    if not _bot:
+        return
+    await asyncio.to_thread(_bot.check_positions_sync)
+
+
+async def job_phase(context: ContextTypes.DEFAULT_TYPE):
+    if not _bot:
+        return
+    await asyncio.to_thread(_bot.update_phase)
+
+
+def main():
+    global _bot
+    init_db()
+    set_scanning_enabled(True)
+    _bot = GoldenBot()
+
+    if not _bot.token:
+        logger.error("TELEGRAM token пустой в config.ini — выход")
+        # fallback: только цикл без TG
+        _bot.update_phase()
         while True:
-            try:
-                now = datetime.now(timezone.utc)
-                if now.date() != last_phase_day and now.hour >= 0:
-                    self.update_phase()
-                    last_phase_day = now.date()
+            _bot.scan_once_sync()
+            _bot.check_positions_sync()
+            time.sleep(60)
+        return
 
-                self.scan_once()
-            except Exception as e:
-                logger.exception("Loop error")
-                self.tg.error(str(e))
-            time.sleep(interval)
+    app = Application.builder().token(_bot.token).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CallbackQueryHandler(on_button))
+
+    scan_min = _bot.cfg.getint("SCANNER", "check_interval_minutes", fallback=15)
+    pos_sec = _bot.cfg.getint("SCANNER", "position_check_seconds", fallback=60)
+
+    if app.job_queue:
+        app.job_queue.run_repeating(job_scan, interval=scan_min * 60, first=10)
+        app.job_queue.run_repeating(job_positions, interval=pos_sec, first=20)
+        app.job_queue.run_repeating(job_phase, interval=3600, first=5)
+    else:
+        logger.warning("job_queue недоступен — поставь python-telegram-bot[job-queue]")
+
+    _bot.update_phase()
+    logger.info("Golden Scanner + Telegram UI старт | paper=%s", _bot.paper)
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    GoldenBot().run_loop()
+    main()
