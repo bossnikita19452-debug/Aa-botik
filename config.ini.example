@@ -3,11 +3,11 @@
 binance_key =
 binance_secret =
 testnet = True
-# demo-fapi.binance.com when testnet=True
 
 [TELEGRAM]
 token =
 chat_id =
+# свой telegram user id через запятую (пусто = доступ всем)
 admin_ids =
 
 [RISK]
@@ -21,6 +21,7 @@ circuit_breaker_pause_minutes = 60
 timeframe = 15m
 btc_phase_timeframe = 1d
 check_interval_minutes = 15
+position_check_seconds = 60
 phase_check_hour_utc = 0
 
 [BRK]
