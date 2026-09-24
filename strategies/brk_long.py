@@ -1,4 +1,9 @@
-"""BRK_LONG — пробой вверх (фаза UPTREND). Приведён к эталону Colab."""
+"""BRK_LONG — пробой вверх (фаза UPTREND). Приведён к эталону Colab.
+
+Добавлен фильтр MAX_ENTRY_GAP = 1.0%:
+если open следующей свечи ушёл от уровня ретеста больше чем на 1% — сделку пропускаем.
+Это отсекает сделки с плохой точкой входа (проверено на Colab: WR 60.7% → 63.9%).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +13,7 @@ import pandas as pd
 
 
 LOCK_BARS = 8
+MAX_ENTRY_GAP = 0.01  # 1.0%
 
 
 @dataclass
@@ -31,12 +37,12 @@ def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
     3. volume > 2.5 * SMA(volume, 20)
     4. RSI 55..70
 
-    ВАЖНО: level = high_40 (уровень пробоя), не close.
+    Возвращает level = high_40 (уровень пробоя), bar_index абсолютный.
     """
     if df is None or len(df) < 50:
         return None
 
-    i = -2  # последняя закрытая свеча
+    i = -2
     row = df.iloc[i]
 
     if pd.isna(row.get("ema20")) or pd.isna(row.get("high_40")):
@@ -56,7 +62,6 @@ def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
     if rsi is None or not (cfg.get("rsi_long_min", 55) <= rsi <= cfg.get("rsi_long_max", 70)):
         return None
 
-    # ФИКС: level = high_40, а не close
     return {
         "level": float(row["high_40"]),
         "bar_index": len(df) - 2,
@@ -73,7 +78,7 @@ def check_retest_entry(
     Ретест в течение retest_bars свечей после пробоя:
     low <= level * 1.001 и close > level → вход на open следующей.
 
-    breakout_bar — абсолютный индекс в df.
+    Фильтр MAX_ENTRY_GAP: если (entry - level) / level > 1% — пропускаем.
     """
     retest_bars = cfg.get("retest_bars", 8)
     start = breakout_bar + 1
@@ -85,7 +90,6 @@ def check_retest_entry(
         row = df.iloc[j]
         level = breakout_level
 
-        # Ретест: цена коснулась уровня снизу и закрылась выше
         if row["low"] <= level * 1.001 and row["close"] > level:
             if j + 1 >= len(df):
                 return None
@@ -93,9 +97,15 @@ def check_retest_entry(
             entry_row = df.iloc[j + 1]
             entry = float(entry_row["open"])
 
+            # ─── ФИЛЬТР: entry не должен быть слишком далеко от level
+            if level > 0:
+                gap = (entry - level) / level
+                if gap > MAX_ENTRY_GAP:
+                    return None
+            # ──────────────────────────────────────────────────
+
             atr = float(entry_row["atr14"]) if pd.notna(entry_row.get("atr14")) else entry * 0.01
 
-            # Стоп: база от уровня, потом clamp ATR
             base_sl = level * (1 - 0.005)
             sl_dist = entry - base_sl
             min_sl = cfg.get("sl_atr_min", 0.3) * atr
@@ -124,8 +134,7 @@ def check_retest_entry(
 def scan_brk_long(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]:
     """
     Полный скан: ищем недавний пробой + ретест.
-
-    ВАЖНО: bar_index должен быть абсолютным в df, а не в sub.
+    bar_index — абсолютный в df.
     """
     if df is None or len(df) < 55:
         return None
@@ -143,7 +152,6 @@ def scan_brk_long(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]:
         if not br:
             continue
 
-        # ФИКС: bar_index — абсолютный в df
         abs_bar = len(sub) - 2
 
         sig = check_retest_entry(df, br["level"], abs_bar, cfg)
