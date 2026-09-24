@@ -1,9 +1,6 @@
 """
 Golden Scanner Bot — Telegram + скан + SL/TP мониторинг.
 Запуск: python main_golden.py
-
-/start — меню
-Кнопки: статистика, сигналы, старт/стоп сканера, скан сейчас, проверить позиции
 """
 from __future__ import annotations
 
@@ -55,25 +52,12 @@ logger = logging.getLogger("golden")
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.ini"
 
-# shared bot instance for jobs
-_bot: "GoldenBot | None" = None
+_bot = None
 
 
-def load_config() -> configparser.ConfigParser:
-    """
-    Загружает config.ini, если есть.
-    Иначе (или в дополнение) — берёт значения из Environment Variables.
-
-    ENV переменные (Railway Variables):
-      TELEGRAM_BOT_TOKEN  -> TELEGRAM.token
-      CHANNEL_ID          -> TELEGRAM.chat_id
-      ADMIN_IDS           -> TELEGRAM.admin_ids
-      BINANCE_KEY         -> API.binance_key
-      BINANCE_SECRET      -> API.binance_secret
-    """
+def load_config():
+    """Загружает config.ini + ENV variables (Railway)."""
     cfg = configparser.ConfigParser()
-
-    # 1. Сначала defaults
     cfg.read_dict({
         "API": {"binance_key": "", "binance_secret": "", "testnet": "True"},
         "TELEGRAM": {"token": "", "chat_id": "", "admin_ids": ""},
@@ -110,14 +94,12 @@ def load_config() -> configparser.ConfigParser:
         "PHASE": {"ema_fast": "50", "ema_slow": "200", "adx_period": "14", "adx_min": "20"},
     })
 
-    # 2. Потом config.ini (если есть)
     if CONFIG_PATH.exists():
         cfg.read(CONFIG_PATH, encoding="utf-8")
-        logger.info("config.ini загружен")
+        logger.info("config.ini loaded")
     else:
-        logger.warning("config.ini не найден — беру из ENV / defaults")
+        logger.warning("config.ini not found — using ENV / defaults")
 
-    # 3. ENV имеет приоритет над файлом
     env_map = {
         ("TELEGRAM", "token"): "TELEGRAM_BOT_TOKEN",
         ("TELEGRAM", "chat_id"): "CHANNEL_ID",
@@ -136,7 +118,7 @@ def load_config() -> configparser.ConfigParser:
     return cfg
 
 
-def section_dict(cfg: configparser.ConfigParser, name: str) -> dict:
+def section_dict(cfg, name):
     if not cfg.has_section(name):
         return {}
     out = {}
@@ -151,20 +133,18 @@ def section_dict(cfg: configparser.ConfigParser, name: str) -> dict:
     return out
 
 
-def main_menu(scanning: bool | None = None) -> InlineKeyboardMarkup:
+def main_menu(scanning=None):
     if scanning is None:
         scanning = is_scanning_enabled()
-    scan_label = "⏸ Остановить сканер" if scanning else "▶️ Запустить сканер"
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📊 Статистика", callback_data="stats")],
-            [InlineKeyboardButton("📋 Последние сигналы", callback_data="last_signals")],
-            [InlineKeyboardButton("📂 Открытые позиции", callback_data="open_pos")],
-            [InlineKeyboardButton(scan_label, callback_data="toggle_scan")],
-            [InlineKeyboardButton("🔄 Сканировать сейчас", callback_data="force_scan")],
-            [InlineKeyboardButton("🔍 Проверить SL/TP", callback_data="check_pos")],
-        ]
-    )
+    scan_label = "Остановить сканер" if scanning else "Запустить сканер"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Статистика", callback_data="stats")],
+        [InlineKeyboardButton("Последние сигналы", callback_data="last_signals")],
+        [InlineKeyboardButton("Открытые позиции", callback_data="open_pos")],
+        [InlineKeyboardButton(scan_label, callback_data="toggle_scan")],
+        [InlineKeyboardButton("Сканировать сейчас", callback_data="force_scan")],
+        [InlineKeyboardButton("Проверить SL/TP", callback_data="check_pos")],
+    ])
 
 
 class GoldenBot:
@@ -194,26 +174,25 @@ class GoldenBot:
         self.paper = not bool(self.cfg.get("API", "binance_key", fallback="").strip())
         self._scan_lock = asyncio.Lock()
 
-        # ─── БЛОКИРОВКА ПОВТОРНЫХ ВХОДОВ (эмуляция used set) ───
-        self.last_signal_time: dict[str, datetime] = {}
+        self.last_signal_time = {}
         self.lock_bars = 8
         self.tf_seconds = 15 * 60
 
-    def is_admin(self, user_id: int) -> bool:
+    def is_admin(self, user_id):
         if not self.admin_ids:
             return True
         return user_id in self.admin_ids
 
-    def circuit_active(self) -> bool:
-        return time.time() <        self.paused_until
+    def circuit_active(self):
+        return time.time() < self.paused_until
 
-    def trigger_c dfircuit(self, = reason: str):
-        mins = self.c fetchfg.getint("RISK", "circ_uit_breaker_pause_minutes", fallklback=60)
+    def trigger_circuit(self, reason):
+        mins = self.cfg.getint("RISK", "circuit_breaker_pause_minutes", fallback=60)
         self.paused_until = time.time() + mins * 60
         self.tg.circuit_breaker(reason, mins)
 
     def update_phase(self):
-ines("BTCUSDT", interval="1d", limit=250, futures=True)
+        df = fetch_klines("BTCUSDT", interval="1d", limit=250, futures=True)
         if df is None:
             logger.error("BTC 1d load failed")
             return
@@ -225,13 +204,12 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
             adx_min=float(self.phase_cfg.get("adx_min", 20)),
         )
         if phase != self.phase:
-            logger.info("Фаза: %s → %s", self.phase.value, phase.value)
+            logger.info("Phase: %s -> %s", self.phase.value, phase.value)
             self.tg.phase(phase.value)
         self.phase = phase
         set_state("btc_phase", phase.value)
 
     def check_positions_sync(self):
-        """Проверка open сделок по last price → SL / TP / TIME."""
         opens = get_open_trades()
         if not opens:
             return 0
@@ -242,7 +220,9 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
             if df is None or df.empty:
                 continue
             last = df.iloc[-1]
-            high, low, close = float(last["high"]), float(last["low"]), float(last["close"])
+            high = float(last["high"])
+            low = float(last["low"])
+            close = float(last["close"])
             entry = float(t["entry_price"])
             stop = float(t["stop_price"])
             take = float(t["take_price"])
@@ -255,14 +235,18 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
 
             if side == "LONG":
                 if low <= stop:
-                    exit_price, reason = stop, "SL"
+                    exit_price = stop
+                    reason = "SL"
                 elif high >= take:
-                    exit_price, reason = take, "TP"
+                    exit_price = take
+                    reason = "TP"
             else:
                 if high >= stop:
-                    exit_price, reason = stop, "SL"
+                    exit_price = stop
+                    reason = "SL"
                 elif low <= take:
-                    exit_price, reason = take, "TP"
+                    exit_price = take
+                    reason = "TP"
 
             try:
                 entry_ts = datetime.fromisoformat(t["entry_time"].replace("Z", "+00:00"))
@@ -270,7 +254,8 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
                     entry_ts = entry_ts.replace(tzinfo=timezone.utc)
                 hours = (datetime.now(timezone.utc) - entry_ts).total_seconds() / 3600
                 if reason is None and hours >= 6:
-                    exit_price, reason = close, "TIME"
+                    exit_price = close
+                    reason = "TIME"
             except Exception:
                 pass
 
@@ -295,7 +280,7 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
                 self.consecutive_losses += 1
                 max_l = self.cfg.getint("RISK", "circuit_breaker_losses", fallback=5)
                 if self.consecutive_losses >= max_l:
-                    self.trigger_circuit(f"{max_l} убытков подряд")
+                    self.trigger_circuit(str(max_l) + " losses in a row")
                     self.consecutive_losses = 0
             else:
                 self.tg.exit_time(symbol, r_mult, pnl)
@@ -305,7 +290,7 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
 
     def scan_once_sync(self):
         if not is_scanning_enabled():
-            logger.info("Сканер выключен")
+            logger.info("Scanner disabled")
             return 0
         if self.circuit_active():
             logger.info("Circuit breaker active")
@@ -313,12 +298,12 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
 
         open_n = count_open()
         if open_n >= self.max_pos:
-            logger.info("Лимит позиций %s/%s", open_n, self.max_pos)
+            logger.info("Position limit %s/%s", open_n, self.max_pos)
             return 0
 
         strategies = active_strategies(self.phase)
         symbols = pairs_for_phase(self.phase.value)
-        logger.info("Скан фаза=%s strat=%s pairs=%s", self.phase.value, strategies, len(symbols))
+        logger.info("Scan phase=%s strat=%s pairs=%s", self.phase.value, strategies, len(symbols))
 
         equity = 1000.0
         if not self.paper:
@@ -335,7 +320,6 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
             if has_open(symbol):
                 continue
 
-            # ─── БЛОКИРОВКА 8 СВЕЧЕЙ ───────────────────────
             now_utc = datetime.now(timezone.utc)
             last = self.last_signal_time.get(symbol)
             if last is not None:
@@ -343,7 +327,6 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
                 lock_seconds = self.lock_bars * self.tf_seconds
                 if elapsed < lock_seconds:
                     continue
-            # ────────────────────────────────────────────────
 
             df = fetch_klines(symbol, interval=self.tf, limit=1000, futures=True)
             if df is None or len(df) < 80:
@@ -368,61 +351,50 @@ ines("BTCUSDT", interval="1d", limit=250, futures=True)
                 amount = 1.0
 
             logger.info("SIGNAL %s %s %s", sig.strategy, sig.side, symbol)
-            self.tg.entry(
-                sig.side, symbol, sig.entry, sig.stop, sig.take, self.risk_pct, sig.strategy
-            )
+            self.tg.entry(sig.side, symbol, sig.entry, sig.stop, sig.take, self.risk_pct, sig.strategy)
 
             opened = False
 
             if self.paper:
-                save_open_trade(
-                    symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take
-                )
+                save_open_trade(symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take)
                 found += 1
                 opened = True
             else:
                 try:
                     res = self.ex.open_with_sl_tp(symbol, sig.side, amount, sig.stop, sig.take)
                     if res.get("entry"):
-                        save_open_trade(
-                            symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take
-                        )
+                        save_open_trade(symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take)
                         found += 1
                         opened = True
                     else:
-                        self.tg.error(f"Order failed {symbol}")
+                        self.tg.error("Order failed " + symbol)
                 except Exception as e:
                     self.tg.error(str(e))
 
-            # ─── ФИКСИРУЕМ ВРЕМЯ СИГНАЛА ────────────────────
             if opened:
                 self.last_signal_time[symbol] = datetime.now(timezone.utc)
-            # ────────────────────────────────────────────────
 
             time.sleep(0.15)
 
-        logger.info("Скан: новых %s", found)
+        logger.info("Scan: new %s", found)
         return found
 
 
-# ─── Telegram handlers ───────────────────────────────────────────
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_start(update, context):
     phase = get_state("btc_phase", "?")
     scanning = is_scanning_enabled()
-    mode = "📄 paper" if (_bot and _bot.paper) else "💰 live"
+    mode = "paper" if (_bot and _bot.paper) else "live"
     text = (
-        "🤖 <b>Golden Scanner</b>\n\n"
-        f"Фаза BTC: <b>{phase}</b>\n"
-        f"Сканер: {'▶️ вкл' if scanning else '⏸ выкл'}\n"
-        f"Режим: {mode}\n"
-        f"Стратегии: BRK + MR по фазе\n\n"
-        "Выберите действие:"
+        "Golden Scanner\n\n"
+        "Phase BTC: " + str(phase) + "\n"
+        "Scanner: " + ("on" if scanning else "off") + "\n"
+        "Mode: " + mode + "\n\n"
+        "Choose action:"
     )
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=main_menu(scanning))
+    await update.message.reply_text(text, reply_markup=main_menu(scanning))
 
 
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_button(update, context):
     global _bot
     query = update.callback_query
     await query.answer()
@@ -432,116 +404,99 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "stats":
         st = get_stats()
         lines = [
-            "📈 <b>Статистика Golden Scanner</b>\n",
-            f"Всего сделок: <b>{st['total']}</b>",
-            f"⏳ Открыто: <b>{st['open']}</b>",
-            f"✅ TP: <b>{st['win']}</b>",
-            f"❌ SL: <b>{st['loss']}</b>",
-            f"⏰ TIME: <b>{st['expired']}</b>",
-            f"\n<b>Winrate: {st['wr']}%</b>",
-            f"🟢 LONG WR: {st['long_wr']}% ({st['long_win']}/{st['long_win']+st['long_loss']})",
-            f"🔴 SHORT WR: {st['short_wr']}% ({st['short_win']}/{st['short_win']+st['short_loss']})",
-            f"\nΣ R: <b>{st['total_r']:+.2f}</b>",
-            f"Σ PnL: <b>${st['total_pnl']:+.2f}</b>",
-            f"\nФаза: {get_state('btc_phase', '?')}",
+            "Statistics Golden Scanner\n",
+            "Total: " + str(st["total"]),
+            "Open: " + str(st["open"]),
+            "TP: " + str(st["win"]),
+            "SL: " + str(st["loss"]),
+            "TIME: " + str(st["expired"]),
+            "",
+            "Winrate: " + str(st["wr"]) + "%",
+            "LONG WR: " + str(st["long_wr"]) + "%",
+            "SHORT WR: " + str(st["short_wr"]) + "%",
+            "",
+            "Total R: " + str(round(st["total_r"], 2)),
+            "Total PnL: $" + str(round(st["total_pnl"], 2)),
+            "",
+            "Phase: " + str(get_state("btc_phase", "?")),
         ]
-        if st["by_strategy"]:
-            lines.append("\nПо стратегиям:")
-            for s in st["by_strategy"]:
-                n = s.get("n") or 0
-                w = s.get("w") or 0
-                wr = round(w / n * 100, 1) if n else 0
-                lines.append(f"  {s['strategy']}: WR {wr}% ({w}/{n})")
-        await query.edit_message_text(
-            "\n".join(lines), parse_mode="HTML", reply_markup=main_menu()
-        )
+        await query.edit_message_text("\n".join(lines), reply_markup=main_menu())
 
     elif data == "last_signals":
         rows = get_recent_trades(10)
         if not rows:
-            await query.edit_message_text("Пока нет сделок.", reply_markup=main_menu())
+            await query.edit_message_text("No trades yet.", reply_markup=main_menu())
             return
-        reason_map = {"TP": "✅", "SL": "❌", "TIME": "⏰", None: "", "": ""}
-        text = "<b>Последние 10:</b>\n\n"
+        reason_map = {"TP": "TP", "SL": "SL", "TIME": "TIME", None: "", "": ""}
+        text = "Last 10:\n\n"
         for r in rows:
             if r["status"] == "open":
-                mark = "⏳"
+                mark = "OPEN"
             else:
-                mark = reason_map.get(r.get("exit_reason"), "⚪")
-            de = "🟢" if r["side"] == "LONG" else "🔴"
+                mark = reason_map.get(r.get("exit_reason"), "?")
+            de = "LONG" if r["side"] == "LONG" else "SHORT"
             extra = ""
             if r["status"] == "closed" and r.get("r_multiple") is not None:
-                extra = f" | R {r['r_multiple']:+.2f}"
-            text += f"{mark} {de} {r['symbol']} {r['strategy']} @ {r['entry_price']:.4g}{extra}\n"
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
+                extra = " | R " + str(round(r["r_multiple"], 2))
+            text += mark + " " + de + " " + str(r["symbol"]) + " " + str(r["strategy"]) + extra + "\n"
+        await query.edit_message_text(text, reply_markup=main_menu())
 
     elif data == "open_pos":
         rows = get_open_trades()
         if not rows:
-            await query.edit_message_text("Нет открытых позиций.", reply_markup=main_menu())
+            await query.edit_message_text("No open positions.", reply_markup=main_menu())
             return
-        text = "<b>Открытые:</b>\n\n"
+        text = "Open:\n\n"
         for r in rows:
-            de = "🟢" if r["side"] == "LONG" else "🔴"
-            text += (
-                f"{de} {r['symbol']} | {r['strategy']}\n"
-                f"  Entry {r['entry_price']:.6g} SL {r['stop_price']:.6g} TP {r['take_price']:.6g}\n"
-            )
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu())
+            de = "LONG" if r["side"] == "LONG" else "SHORT"
+            text += de + " " + str(r["symbol"]) + " | " + str(r["strategy"]) + "\n"
+        await query.edit_message_text(text, reply_markup=main_menu())
 
     elif data == "toggle_scan":
         if _bot and not _bot.is_admin(uid):
-            await query.answer("Нет доступа", show_alert=True)
+            await query.answer("No access", show_alert=True)
             return
         new_state = not is_scanning_enabled()
         set_scanning_enabled(new_state)
-        await query.answer("Сканер включён" if new_state else "Сканер выключен")
+        await query.answer("Scanner on" if new_state else "Scanner off")
         phase = get_state("btc_phase", "?")
-        text = (
-            f"🤖 <b>Golden Scanner</b>\n"
-            f"Сканер: {'▶️ вкл' if new_state else '⏸ выкл'}\n"
-            f"Фаза: {phase}"
-        )
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu(new_state))
+        text = "Golden Scanner\nScanner: " + ("on" if new_state else "off") + "\nPhase: " + str(phase)
+        await query.edit_message_text(text, reply_markup=main_menu(new_state))
 
     elif data == "force_scan":
         if _bot and not _bot.is_admin(uid):
-            await query.answer("Нет доступа", show_alert=True)
+            await query.answer("No access", show_alert=True)
             return
-        await query.edit_message_text("🔄 Сканирую...")
+        await query.edit_message_text("Scanning...")
         if _bot:
             n = await asyncio.to_thread(_bot.scan_once_sync)
-            await query.edit_message_text(
-                f"✅ Скан завершён. Новых сигналов: {n}", reply_markup=main_menu()
-            )
+            await query.edit_message_text("Scan done. New signals: " + str(n), reply_markup=main_menu())
         else:
-            await query.edit_message_text("Бот не инициализирован", reply_markup=main_menu())
+            await query.edit_message_text("Bot not initialized", reply_markup=main_menu())
 
     elif data == "check_pos":
-        await query.edit_message_text("🔍 Проверяю позиции...")
+        await query.edit_message_text("Checking positions...")
         if _bot:
             n = await asyncio.to_thread(_bot.check_positions_sync)
-            await query.edit_message_text(
-                f"✅ Проверка готова. Закрыто: {n}", reply_markup=main_menu()
-            )
+            await query.edit_message_text("Check done. Closed: " + str(n), reply_markup=main_menu())
         else:
-            await query.edit_message_text("Ошибка", reply_markup=main_menu())
+            await query.edit_message_text("Error", reply_markup=main_menu())
 
 
-async def job_scan(context: ContextTypes.DEFAULT_TYPE):
+async def job_scan(context):
     if not _bot:
         return
     async with _bot._scan_lock:
         await asyncio.to_thread(_bot.scan_once_sync)
 
 
-async def job_positions(context: ContextTypes.DEFAULT_TYPE):
+async def job_positions(context):
     if not _bot:
         return
     await asyncio.to_thread(_bot.check_positions_sync)
 
 
-async def job_phase(context: ContextTypes.DEFAULT_TYPE):
+async def job_phase(context):
     if not _bot:
         return
     await asyncio.to_thread(_bot.update_phase)
@@ -554,7 +509,7 @@ def main():
     _bot = GoldenBot()
 
     if not _bot.token:
-        logger.error("TELEGRAM token пустой — выход")
+        logger.error("TELEGRAM token empty — running without TG")
         _bot.update_phase()
         while True:
             _bot.scan_once_sync()
@@ -574,10 +529,10 @@ def main():
         app.job_queue.run_repeating(job_positions, interval=pos_sec, first=20)
         app.job_queue.run_repeating(job_phase, interval=3600, first=5)
     else:
-        logger.warning("job_queue недоступен — поставь python-telegram-bot[job-queue]")
+        logger.warning("job_queue unavailable — install python-telegram-bot[job-queue]")
 
     _bot.update_phase()
-    logger.info("Golden Scanner + Telegram UI старт | paper=%s", _bot.paper)
+    logger.info("Golden Scanner started | paper=%s", _bot.paper)
     app.run_polling(drop_pending_updates=True)
 
 
