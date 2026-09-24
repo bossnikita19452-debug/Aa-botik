@@ -1,4 +1,9 @@
-"""Определение фазы рынка BTC (1d): UPTREND / DOWNTREND / RANGE."""
+"""Определение фазы рынка BTC (1d): UPTREND / DOWNTREND / RANGE.
+
+Исправлено:
+- Берём последнюю ЗАКРЫТУЮ дневную свечу (iloc[-2]), а не текущую (iloc[-1]).
+  Текущая дневная свеча меняется внутри дня → фаза могла скакать.
+"""
 from __future__ import annotations
 
 from enum import Enum
@@ -25,6 +30,9 @@ def detect_btc_phase(
     UPTREND: close > EMA50 и ADX > adx_min
     DOWNTREND: close < EMA50 и ADX > adx_min
     RANGE: всё остальное
+
+    Использует последнюю ЗАКРЫТУЮ свечу (iloc[-2]), т.к. iloc[-1] — текущая
+    незакрытая свеча, её close меняется в течение дня.
     """
     if df_1d is None or len(df_1d) < max(ema_slow, adx_period) + 5:
         return MarketPhase.RANGE
@@ -35,7 +43,11 @@ def detect_btc_phase(
     df["ema200"] = ema(c, ema_slow)
     df["adx"] = adx(df["high"], df["low"], c, adx_period)
 
-    row = df.iloc[-1]
+    # Берём предпоследнюю свечу (последняя закрытая)
+    if len(df) < 2:
+        return MarketPhase.RANGE
+    row = df.iloc[-2]
+
     close = float(row["close"])
     e50 = float(row["ema50"])
     adx_v = float(row["adx"]) if pd.notna(row["adx"]) else 0.0
