@@ -1,4 +1,11 @@
-"""Telegram-уведомления Golden Scanner."""
+"""Telegram-уведомления Golden Scanner. Русский язык.
+
+Формат сигнала:
+  Вход        — реальная цена входа (open свечи после ретеста)
+  Уровень     — уровень ретеста (справочно)
+  Стоп / Тейк — цены
+  Риск        — % от депозита
+"""
 from __future__ import annotations
 
 import logging
@@ -20,9 +27,9 @@ class TelegramNotifier:
 
     def send(self, text: str, parse_mode: str = "HTML") -> bool:
         if not self.enabled:
-            logger.info("[TG disabled] %s", text[:120])
+            logger.info("[TG выкл] %s", text[:200])
             return False
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        url = "https://api.telegram.org/bot" + self.token + "/sendMessage"
         try:
             r = requests.post(
                 url,
@@ -46,31 +53,104 @@ class TelegramNotifier:
         tp: float,
         risk_pct: float,
         strategy: str,
+        level: Optional[float] = None,
     ):
-        emoji = "🟢" if side.upper() == "LONG" else "🔴"
+        """Сигнал на вход. level — необязательно, показываем справочно."""
+        if side.upper() == "LONG":
+            emoji = "🟢"
+            side_ru = "ЛОНГ"
+        else:
+            emoji = "🔴"
+            side_ru = "ШОРТ"
+
+        lines = []
+        lines.append(emoji + " <b>" + side_ru + " " + symbol + "</b> | " + strategy)
+        lines.append("")
+
+        # Основные цены
+        lines.append("Вход:  <code>" + self._fmt(entry) + "</code>")
+        lines.append("Стоп:  <code>" + self._fmt(sl) + "</code>")
+        lines.append("Тейк:  <code>" + self._fmt(tp) + "</code>")
+
+        # Разрыв от уровня (если передан)
+        if level is not None and level > 0:
+            gap = (entry - level) / level * 100
+            gap_abs = abs(gap)
+            if gap_abs < 0.01:
+                gap_str = "0.00%"
+            else:
+                gap_str = ("+" if gap >= 0 else "") + str(round(gap, 2)) + "%"
+            lines.append("Уровень: <code>" + self._fmt(level) + "</code> (разрыв " + gap_str + ")")
+
+        lines.append("")
+        lines.append("Риск: <b>" + str(round(risk_pct, 2)) + "%</b>")
+
+        # SL / TP в %
+        if entry > 0:
+            sl_pct = abs(entry - sl) / entry * 100
+            tp_pct = abs(tp - entry) / entry * 100
+            lines.append("Стоп: " + str(round(sl_pct, 2)) + "% | Тейк: " + str(round(tp_pct, 2)) + "%")
+
+        self.send("\n".join(lines))
+
+    def exit_tp(self, symbol: str, r: float, pnl: float):
+        emoji = "✅"
         text = (
-            f"{emoji} <b>{side.upper()} {symbol}</b> | {strategy}\n"
-            f"Entry: <code>{entry:.6g}</code>\n"
-            f"SL: <code>{sl:.6g}</code>\n"
-            f"TP: <code>{tp:.6g}</code>\n"
-            f"Риск: <b>{risk_pct:.1f}%</b>"
+            emoji + " <b>ТЕЙК-ПРОФИТ</b> " + symbol + "\n"
+            "Результат: <b>+" + str(round(r, 2)) + "R</b>\n"
+            "PnL: <b>$" + str(round(pnl, 2)) + "</b>"
         )
         self.send(text)
 
-    def exit_tp(self, symbol: str, r: float, pnl: float):
-        self.send(f"✅ TP <b>{symbol}</b> +{r:.2f}R | PnL <b>${pnl:.2f}</b>")
-
     def exit_sl(self, symbol: str, r: float, pnl: float):
-        self.send(f"❌ SL <b>{symbol}</b> {r:.2f}R | PnL <b>${pnl:.2f}</b>")
+        emoji = "❌"
+        text = (
+            emoji + " <b>СТОП-ЛОСС</b> " + symbol + "\n"
+            "Результат: <b>" + str(round(r, 2)) + "R</b>\n"
+            "PnL: <b>$" + str(round(pnl, 2)) + "</b>"
+        )
+        self.send(text)
 
     def exit_time(self, symbol: str, r: float, pnl: float):
-        self.send(f"⏰ TimeStop <b>{symbol}</b> {r:+.2f}R | PnL <b>${pnl:.2f}</b>")
+        emoji = "⏰"
+        sign = "+" if r >= 0 else ""
+        text = (
+            emoji + " <b>ВРЕМЯ ИСТЕКЛО</b> " + symbol + "\n"
+            "Результат: <b>" + sign + str(round(r, 2)) + "R</b>\n"
+            "PnL: <b>$" + str(round(pnl, 2)) + "</b>"
+        )
+        self.send(text)
 
     def error(self, msg: str):
-        self.send(f"⚠️ API error: {msg}")
+        self.send("⚠️ <b>Ошибка API</b>\n" + str(msg)[:300])
 
     def circuit_breaker(self, reason: str, minutes: int = 60):
-        self.send(f"🛑 Бот остановлен на {minutes} мин\nПричина: {reason}")
+        self.send(
+            "🛑 <b>Сканер остановлен</b>\n"
+            "Причина: " + reason + "\n"
+            "Пауза: " + str(minutes) + " мин"
+        )
 
     def phase(self, phase: str):
-        self.send(f"📡 Фаза BTC: <b>{phase}</b>")
+        ru = {"UPTREND": "ВОСХОДЯЩИЙ", "DOWNTREND": "НИСХОДЯЩИЙ", "RANGE": "БОКОВИК"}.get(phase, phase)
+        self.send("📡 <b>Фаза BTC: " + ru + "</b>")
+
+    def signal_skipped(self, symbol: str, reason: str):
+        """Если сигнал был, но пропущен (например, gap > MAX_ENTRY_GAP)."""
+        self.send(
+            "⚠️ <b>Сигнал пропущен</b> " + symbol + "\n"
+            "Причина: " + reason
+        )
+
+    @staticmethod
+    def _fmt(x: float) -> str:
+        """Форматирует цену без лишних нулей."""
+        if x is None:
+            return "-"
+        if x >= 1000:
+            return str(round(x, 2))
+        if x >= 1:
+            return str(round(x, 4))
+        if x >= 0.01:
+            return str(round(x, 5))
+        return str(round(x, 7))
