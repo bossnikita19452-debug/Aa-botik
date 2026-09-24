@@ -1,18 +1,21 @@
 """BRK_SHORT — пробой вниз (фаза DOWNTREND). Зеркало BRK_LONG.
 
-Добавлен фильтр MAX_ENTRY_GAP = 1.0%:
-если open следующей свечи ушёл от уровня ретеста больше чем на 1% — сделку пропускаем.
+Фильтры:
+- MAX_ENTRY_GAP = 1.0% — entry не дальше 1% от уровня ретеста.
+- ATR_FILTER = 1.5× — не входим, если ATR(14) > 1.5 × SMA(ATR, 30).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 
 LOCK_BARS = 8
-MAX_ENTRY_GAP = 0.01  # 1.0%
+MAX_ENTRY_GAP = 0.01       # 1.0%
+ATR_FILTER_MULT = 1.5      # ATR(14) > 1.5 × SMA(ATR,30) → пропускаем
 
 
 @dataclass
@@ -36,7 +39,7 @@ def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
     3. volume > 2.5 * SMA(volume, 20)
     4. RSI 30..45
 
-    Возвращает level = low_40 (уровень пробоя), bar_index абсолютный.
+    Возвращает level = low_40, bar_index абсолютный.
     """
     if df is None or len(df) < 50:
         return None
@@ -60,6 +63,15 @@ def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
     rsi = row.get("rsi14")
     if rsi is None or not (cfg.get("rsi_short_min", 30) <= rsi <= cfg.get("rsi_short_max", 45)):
         return None
+
+    # ─── ФИЛЬТР ВОЛАТИЛЬНОСТИ ──────────────────────────────
+    atr_val = row.get("atr14")
+    atr_sma = row.get("atr_sma30")
+    if atr_val is not None and atr_sma is not None:
+        if np.isfinite(atr_val) and np.isfinite(atr_sma) and atr_sma > 0:
+            if atr_val > ATR_FILTER_MULT * atr_sma:
+                return None
+    # ──────────────────────────────────────────────────────
 
     return {
         "level": float(row["low_40"]),
@@ -96,12 +108,10 @@ def check_retest_entry(
             entry_row = df.iloc[j + 1]
             entry = float(entry_row["open"])
 
-            # ─── ФИЛЬТР: entry не должен быть слишком далеко от level
             if level > 0:
                 gap = abs(entry - level) / level
                 if gap > MAX_ENTRY_GAP:
                     return None
-            # ──────────────────────────────────────────────────
 
             atr = float(entry_row["atr14"]) if pd.notna(entry_row.get("atr14")) else entry * 0.01
 
@@ -144,9 +154,11 @@ def scan_brk_short(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]
 
         sub = df.iloc[: len(df) - offset + 1].copy()
         if len(sub) < 45:
-            continue
+           TR continue
 
-        sub["low_40"] = sub["low"].rolling(40).min().shift(1)
+        sub["low_40"] =).
+
+ sub["low"].rolling(40).min().shift(1)
         br = check_breakout_signal(sub, cfg)
         if not br:
             continue
@@ -158,4 +170,4 @@ def scan_brk_short(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]
             sig.symbol = symbol
             return sig
 
-    return None
+    return** None
