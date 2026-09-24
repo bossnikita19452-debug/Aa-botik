@@ -1,9 +1,4 @@
-"""BRK_SHORT — пробой вниз (фаза DOWNTREND). Зеркало BRK_LONG.
-
-Фильтры:
-- MAX_ENTRY_GAP = 1.0% — entry не дальше 1% от уровня ретеста.
-- ATR_FILTER = 1.5× — не входим, если ATR(14) > 1.5 × SMA(ATR, 30).
-"""
+"""BRK_SHORT — пробой вниз (фаза DOWNTREND). Зеркало BRK_LONG."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,14 +9,14 @@ import pandas as pd
 
 
 LOCK_BARS = 8
-MAX_ENTRY_GAP = 0.01       # 1.0%
-ATR_FILTER_MULT = 1.5      # ATR(14) > 1.5 × SMA(ATR,30) → пропускаем
+MAX_ENTRY_GAP = 0.01
+ATR_FILTER_MULT = 1.5
 
 
 @dataclass
 class Signal:
     strategy: str
-    side: str  # SHORT
+    side: str
     symbol: str
     entry: float
     stop: float
@@ -32,15 +27,6 @@ class Signal:
 
 
 def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
-    """
-    Условия пробоя вниз (на закрытой свече -2):
-    1. EMA20 < EMA50
-    2. close < Low(40).shift(1)
-    3. volume > 2.5 * SMA(volume, 20)
-    4. RSI 30..45
-
-    Возвращает level = low_40, bar_index абсолютный.
-    """
     if df is None or len(df) < 50:
         return None
 
@@ -64,14 +50,12 @@ def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
     if rsi is None or not (cfg.get("rsi_short_min", 30) <= rsi <= cfg.get("rsi_short_max", 45)):
         return None
 
-    # ─── ФИЛЬТР ВОЛАТИЛЬНОСТИ ──────────────────────────────
     atr_val = row.get("atr14")
     atr_sma = row.get("atr_sma30")
     if atr_val is not None and atr_sma is not None:
         if np.isfinite(atr_val) and np.isfinite(atr_sma) and atr_sma > 0:
             if atr_val > ATR_FILTER_MULT * atr_sma:
                 return None
-    # ──────────────────────────────────────────────────────
 
     return {
         "level": float(row["low_40"]),
@@ -85,12 +69,6 @@ def check_retest_entry(
     breakout_bar: int,
     cfg: dict,
 ) -> Optional[Signal]:
-    """
-    Ретест в течение retest_bars свечей после пробоя вниз:
-    high >= level * 0.999 и close < level → вход на open следующей.
-
-    Фильтр MAX_ENTRY_GAP: для шорта |entry - level| / level > 1% — пропускаем.
-    """
     retest_bars = cfg.get("retest_bars", 8)
     start = breakout_bar + 1
     end = min(breakout_bar + 1 + retest_bars, len(df) - 1)
@@ -141,10 +119,6 @@ def check_retest_entry(
 
 
 def scan_brk_short(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]:
-    """
-    Полный скан: ищем недавний пробой вниз + ретест.
-    bar_index — абсолютный в df.
-    """
     if df is None or len(df) < 55:
         return None
 
@@ -154,11 +128,9 @@ def scan_brk_short(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]
 
         sub = df.iloc[: len(df) - offset + 1].copy()
         if len(sub) < 45:
-           TR continue
+            continue
 
-        sub["low_40"] =).
-
- sub["low"].rolling(40).min().shift(1)
+        sub["low_40"] = sub["low"].rolling(40).min().shift(1)
         br = check_breakout_signal(sub, cfg)
         if not br:
             continue
@@ -170,4 +142,4 @@ def scan_brk_short(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]
             sig.symbol = symbol
             return sig
 
-    return** None
+    return None
