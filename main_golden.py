@@ -162,9 +162,15 @@ class GoldenBot:
         self.paper = not bool(self.cfg.get("API", "binance_key", fallback="").strip())
         self._scan_lock = asyncio.Lock()
 
+        # ─── БЛОКИРОВКА ПОВТОРНЫХ ВХОДОВ (эмуляция used set) ───
+        # symbol -> datetime последнего сигнала
+        self.last_signal_time: dict[str, datetime] = {}
+        self.lock_bars = 8
+        self.tf_seconds = 15 * 60  # 15m
+
     def is_admin(self, user_id: int) -> bool:
         if not self.admin_ids:
-            return True  # если список пуст — разрешаем всем
+            return True
         return user_id in self.admin_ids
 
     def circuit_active(self) -> bool:
@@ -227,7 +233,6 @@ class GoldenBot:
                 elif low <= take:
                     exit_price, reason = take, "TP"
 
-            # time stop ~24 bars * 15m = 6h
             try:
                 entry_ts = datetime.fromisoformat(t["entry_time"].replace("Z", "+00:00"))
                 if entry_ts.tzinfo is None:
@@ -299,7 +304,17 @@ class GoldenBot:
             if has_open(symbol):
                 continue
 
-            df = fetch_klines(symbol, interval=self.tf, limit=300, futures=True)
+            # ─── БЛОКИРОВКА 8 СВЕЧЕЙ ───────────────────────
+            now_utc = datetime.now(timezone.utc)
+            last = self.last_signal_time.get(symbol)
+            if last is not None:
+                elapsed = (now_utc - last).total_seconds()
+                lock_seconds = self.lock_bars * self.tf_seconds  # 7200 сек = 2ч
+                if elapsed < lock_seconds:
+                    continue
+            # ────────────────────────────────────────────────
+
+            df = fetch_klines(symbol, interval=self.tf, limit=1000, futures=True)
             if df is None or len(df) < 80:
                 continue
             df = add_common_indicators(df)
@@ -319,18 +334,21 @@ class GoldenBot:
 
             amount = self.ex.position_size(equity, self.risk_pct, sig.entry, sig.stop)
             if amount <= 0:
-                amount = 1.0  # paper placeholder
+                amount = 1.0
 
             logger.info("SIGNAL %s %s %s", sig.strategy, sig.side, symbol)
             self.tg.entry(
                 sig.side, symbol, sig.entry, sig.stop, sig.take, self.risk_pct, sig.strategy
             )
 
+            opened = False
+
             if self.paper:
                 save_open_trade(
                     symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take
                 )
                 found += 1
+                opened = True
             else:
                 try:
                     res = self.ex.open_with_sl_tp(symbol, sig.side, amount, sig.stop, sig.take)
@@ -339,10 +357,17 @@ class GoldenBot:
                             symbol, sig.strategy, sig.side, sig.entry, amount, sig.stop, sig.take
                         )
                         found += 1
+                        opened = True
                     else:
                         self.tg.error(f"Order failed {symbol}")
                 except Exception as e:
                     self.tg.error(str(e))
+
+            # ─── ФИКСИРУЕМ ВРЕМЯ СИГНАЛА ДЛЯ БЛОКИРОВКИ ──────
+            if opened:
+                self.last_signal_time[symbol] = datetime.now(timezone.utc)
+            # ────────────────────────────────────────────────
+
             time.sleep(0.15)
 
         logger.info("Скан: новых %s", found)
@@ -405,7 +430,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not rows:
             await query.edit_message_text("Пока нет сделок.", reply_markup=main_menu())
             return
-        status_map = {"open": "⏳", "closed": ""}
         reason_map = {"TP": "✅", "SL": "❌", "TIME": "⏰", None: "", "": ""}
         text = "<b>Последние 10:</b>\n\n"
         for r in rows:
@@ -500,7 +524,6 @@ def main():
 
     if not _bot.token:
         logger.error("TELEGRAM token пустой в config.ini — выход")
-        # fallback: только цикл без TG
         _bot.update_phase()
         while True:
             _bot.scan_once_sync()
