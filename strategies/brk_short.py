@@ -1,4 +1,4 @@
-"""BRK_SHORT — пробой вниз (фаза DOWNTREND). Зеркало BRK_LONG."""
+"""BRK_SHORT — пробой вниз (фаза DOWNTREND). Зеркало BRK_LONG. Приведён к эталону Colab."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,10 +7,13 @@ from typing import Optional
 import pandas as pd
 
 
+LOCK_BARS = 8
+
+
 @dataclass
 class Signal:
     strategy: str
-    side: str
+    side: str  # SHORT
     symbol: str
     entry: float
     stop: float
@@ -21,27 +24,57 @@ class Signal:
 
 
 def check_breakout_signal(df: pd.DataFrame, cfg: dict) -> Optional[dict]:
+    """
+    Условия пробоя вниз (на закрытой свече -2):
+    1. EMA20 < EMA50
+    2. close < Low(40).shift(1)
+    3. volume > 2.5 * SMA(volume, 20)
+    4. RSI 30..45
+
+    ВАЖНО: level = low_40 (уровень пробоя), не close.
+    """
     if df is None or len(df) < 50:
         return None
-    row = df.iloc[-2]
+
+    i = -2  # последняя закрытая свеча
+    row = df.iloc[i]
+
     if pd.isna(row.get("ema20")) or pd.isna(row.get("low_40")):
         return None
     if not (row["ema20"] < row["ema50"]):
         return None
     if not (row["close"] < row["low_40"]):
         return None
+
     vol_sma = row.get("vol_sma20")
-    if vol_sma is None or vol_sma <= 0 or row["volume"] < cfg.get("volume_mult", 2.5) * vol_sma:
+    if vol_sma is None or vol_sma <= 0:
         return None
+    if row["volume"] < cfg.get("volume_mult", 2.5) * vol_sma:
+        return None
+
     rsi = row.get("rsi14")
     if rsi is None or not (cfg.get("rsi_short_min", 30) <= rsi <= cfg.get("rsi_short_max", 45)):
         return None
-    return {"level": float(row["close"]), "bar_index": len(df) - 2}
+
+    # ФИКС: level = low_40, а не close
+    return {
+        "level": float(row["low_40"]),
+        "bar_index": len(df) - 2,
+    }
 
 
 def check_retest_entry(
-    df: pd.DataFrame, breakout_level: float, breakout_bar: int, cfg: dict
+    df: pd.DataFrame,
+    breakout_level: float,
+    breakout_bar: int,
+    cfg: dict,
 ) -> Optional[Signal]:
+    """
+    Ретест в течение retest_bars свечей после пробоя вниз:
+    high >= level * 0.999 и close < level → вход на open следующей.
+
+    breakout_bar — абсолютный индекс в df.
+    """
     retest_bars = cfg.get("retest_bars", 8)
     start = breakout_bar + 1
     end = min(breakout_bar + 1 + retest_bars, len(df) - 1)
@@ -51,13 +84,18 @@ def check_retest_entry(
     for j in range(start, end):
         row = df.iloc[j]
         level = breakout_level
+
+        # Ретест: цена коснулась уровня сверху и закрылась ниже
         if row["high"] >= level * 0.999 and row["close"] < level:
             if j + 1 >= len(df):
                 return None
+
             entry_row = df.iloc[j + 1]
             entry = float(entry_row["open"])
+
             atr = float(entry_row["atr14"]) if pd.notna(entry_row.get("atr14")) else entry * 0.01
 
+            # Стоп: база от уровня СВЕРХУ, потом clamp ATR
             base_sl = level * (1 + 0.005)
             sl_dist = base_sl - entry
             min_sl = cfg.get("sl_atr_min", 0.3) * atr
@@ -65,6 +103,7 @@ def check_retest_entry(
             sl_dist = max(min_sl, min(max_sl, sl_dist))
             if sl_dist <= 0:
                 return None
+
             sl = entry + sl_dist
             tp = entry - cfg.get("rr", 1.5) * sl_dist
 
@@ -77,24 +116,39 @@ def check_retest_entry(
                 take=tp,
                 breakout_level=level,
                 atr=atr,
-                reason="breakout_retest",
+                reason="breakout_retest_short",
             )
     return None
 
 
 def scan_brk_short(df: pd.DataFrame, symbol: str, cfg: dict) -> Optional[Signal]:
+    """
+    Полный скан: ищем недавний пробой вниз + ретест.
+
+    ВАЖНО: bar_index должен быть абсолютным в df, а не в sub.
+    """
     if df is None or len(df) < 55:
         return None
+
     for offset in range(2, 12):
         if len(df) < offset + 45:
             continue
+
         sub = df.iloc[: len(df) - offset + 1].copy()
+        if len(sub) < 45:
+            continue
+
         sub["low_40"] = sub["low"].rolling(40).min().shift(1)
         br = check_breakout_signal(sub, cfg)
         if not br:
             continue
-        sig = check_retest_entry(df, br["level"], br["bar_index"], cfg)
+
+        # ФИКС: bar_index — абсолютный в df
+        abs_bar = len(sub) - 2
+
+        sig = check_retest_entry(df, br["level"], abs_bar, cfg)
         if sig:
             sig.symbol = symbol
             return sig
+
     return None
