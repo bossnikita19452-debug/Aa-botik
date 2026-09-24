@@ -2,38 +2,45 @@
 
 Реализация ТЗ: 4 стратегии с переключением по фазе BTC.
 
-## Статус
+## Статус — каркас готов
 
 ### Готово
 - `config.ini.example` — все параметры
 - `core/indicators.py` — EMA, RSI, BB, ATR, ADX
-- `core/phase.py` — UPTREND / DOWNTREND / RANGE по BTC 1d
-- `strategies/brk_long.py` — пробой вверх + ретест
-- `strategies/brk_short.py` — пробой вниз + ретест
-- `strategies/mr_long.py` — mean reversion long
-- `strategies/mr_short.py` — mean reversion short
+- `core/phase.py` — UPTREND / DOWNTREND / RANGE
+- `core/data.py` — OHLCV Binance Futures public API
+- `core/exchange.py` — ccxt market + STOP_MARKET + TP reduceOnly
+- `core/pairs.py` — списки пар из ТЗ
+- `strategies/brk_long.py` / `brk_short.py` / `mr_long.py` / `mr_short.py`
+- `storage/db.py` — SQLite trades + bot_state
+- `bot/telegram_notify.py` — входы/выходы/ошибки/circuit
+- `main_golden.py` — цикл: фаза раз в день + скан каждые 15 мин
+- `requirements.txt` — + ccxt, requests
 
-### В работе / далее
-- `core/exchange.py` — ccxt Binance Futures (+ demo)
-- `core/data.py` — OHLCV (Binance public / vision)
-- `bot/telegram.py` — уведомления
-- `storage/trades.db` + schema
-- `main.py` — планировщик 15m + phase daily
-- Риск: размер позиции, max positions, circuit breaker
-- Ордера: market + STOP_MARKET / TAKE_PROFIT_MARKET с reduceOnly
+### Ещё можно доработать
+- Мониторинг закрытий SL/TP с биржи → запись exit в БД + TG
+- Time-stop 24 свечи (сейчас SL/TP на бирже)
+- Дневной circuit breaker по просадке 5%
+- Уточнение demo URL Binance Demo Trading
+- Бэктест-скрипт на истории
+
+## Запуск
+
+```bash
+cp config.ini.example config.ini
+# заполнить token, chat_id; для live — ключи, testnet=False
+pip install -r requirements.txt
+python main_golden.py
+```
+
+Без API-ключей бот работает в **paper-режиме** (только сигналы + запись в SQLite + Telegram).
 
 ## Фаза BTC (1d)
-| Условие | Фаза | Активные сканеры |
-|---------|------|------------------|
+| Условие | Фаза | Сканеры |
+|---------|------|--------|
 | close > EMA50 и ADX > 20 | UPTREND | BRK_LONG |
 | close < EMA50 и ADX > 20 | DOWNTREND | BRK_SHORT |
 | иначе | RANGE | MR_LONG + MR_SHORT |
-
-## Запуск (когда main готов)
-1. Скопировать `config.ini.example` → `config.ini`
-2. Вписать API keys (testnet=True) и Telegram
-3. `pip install -r requirements.txt`
-4. `python main.py`
 
 ## Целевые метрики (из ТЗ)
 - WR 50–57%
