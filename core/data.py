@@ -63,6 +63,7 @@ def fetch_klines(
                 raw = r.json()
                 if not raw or not isinstance(raw, list):
                     break
+
                 df = pd.DataFrame(
                     raw,
                     columns=[
@@ -75,17 +76,17 @@ def fetch_klines(
                         "close_time",
                         "quote_volume",
                         "trades",
-                        "taker_buy_base "",
-                        "taker_buy_volumequote",
+                        "taker_buy_base",
+                        "taker_buy_quote",
                         "ignore",
                     ],
                 )
-                df["open"]_time"] = pd.to_datetime(df["]
-open_time"], unit="ms", utc=True)
-                           for col in ("open", "high", "low", "close", "volume"):
+                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+                for col in ("open", "high", "low", "close", "volume"):
                     df[col] = pd.to_numeric(df[col], errors="coerce")
                 df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
-                return df[["open_time", "open", "high", "low", "close", except Exception as e:
+                return df[["open_time", "open", "high", "low", "close", "volume"]]
+            except Exception as e:
                 print(f"⚠️ {symbol} {url.split('/')[2]}: {e}")
                 time.sleep(0.5 * (attempt + 1))
     return None
